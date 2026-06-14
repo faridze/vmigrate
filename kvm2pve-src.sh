@@ -2,7 +2,7 @@
 # kvm2pve source-side helper
 set -Eeuo pipefail
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -65,16 +65,13 @@ write_key(){
 }
 
 init_config(){
-  local vm pve_host pve_vmid pve_disk pve_user ssh_port src_disk nbd_port nbd_export
+  local vm pve_host pve_vmid pve_disk ssh_port src_disk
   ask vm "Source VM name" "kvm3023"
   ask pve_host "Proxmox host/IP" "CHANGE_ME"
+  ask ssh_port "Proxmox SSH port" "22"
   ask pve_vmid "Destination Proxmox VMID" "2672"
   ask pve_disk "Destination disk path" "/dev/pve/vm-${pve_vmid}-disk-0"
-  ask pve_user "Proxmox SSH user" "root"
-  ask ssh_port "Proxmox SSH port" "22"
   ask src_disk "Source disk path, empty=auto-discover" ""
-  ask nbd_port "NBD port" "10809"
-  ask nbd_export "NBD export name" "$vm"
   cat > "$CONFIG_FILE" <<EOF
 VM_NAME=$vm
 SRC_DISK=$src_disk
@@ -83,12 +80,12 @@ QEMU_NODE=
 BITMAP=kvm2pve
 TARGET_NODE=kvm2pve-target
 PVE_HOST=$pve_host
-PVE_SSH_USER=$pve_user
+PVE_SSH_USER=root
 PVE_SSH_PORT=$ssh_port
 PVE_VMID=$pve_vmid
 PVE_DISK=$pve_disk
-NBD_PORT=$nbd_port
-NBD_EXPORT=$nbd_export
+NBD_PORT=10809
+NBD_EXPORT=$vm
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
 EOF
@@ -97,20 +94,26 @@ EOF
 }
 
 ensure_base_config(){
-  local vm_arg="${1:-}" vm pve_host pve_vmid pve_disk pve_user ssh_port nbd_port nbd_export
+  local vm_arg="${1:-}" vm pve_host pve_vmid pve_disk ssh_port
   if [[ -f "$CONFIG_FILE" ]]; then
     vm="${vm_arg:-$(get_conf VM_NAME)}"
     [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
+    write_key VM_NAME "$vm"
+    [[ -n "$(get_conf PVE_SSH_USER)" ]] || write_key PVE_SSH_USER root
+    [[ -n "$(get_conf PVE_SSH_PORT)" ]] || write_key PVE_SSH_PORT 22
+    [[ -n "$(get_conf NBD_PORT)" ]] || write_key NBD_PORT 10809
+    [[ -n "$(get_conf NBD_EXPORT)" ]] || write_key NBD_EXPORT "$vm"
+    [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
+    [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
+    [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP kvm2pve
+    [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE kvm2pve-target
   else
     vm="$vm_arg"
     [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
     ask pve_host "Proxmox host/IP" "CHANGE_ME"
+    ask ssh_port "Proxmox SSH port" "22"
     ask pve_vmid "Destination Proxmox VMID" "2672"
     ask pve_disk "Destination disk path" "/dev/pve/vm-${pve_vmid}-disk-0"
-    ask pve_user "Proxmox SSH user" "root"
-    ask ssh_port "Proxmox SSH port" "22"
-    ask nbd_port "NBD port" "10809"
-    ask nbd_export "NBD export name" "$vm"
     cat > "$CONFIG_FILE" <<EOF
 VM_NAME=$vm
 SRC_DISK=
@@ -119,18 +122,17 @@ QEMU_NODE=
 BITMAP=kvm2pve
 TARGET_NODE=kvm2pve-target
 PVE_HOST=$pve_host
-PVE_SSH_USER=$pve_user
+PVE_SSH_USER=root
 PVE_SSH_PORT=$ssh_port
 PVE_VMID=$pve_vmid
 PVE_DISK=$pve_disk
-NBD_PORT=$nbd_port
-NBD_EXPORT=$nbd_export
+NBD_PORT=10809
+NBD_EXPORT=$vm
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
 EOF
     chmod 600 "$CONFIG_FILE"
   fi
-  write_key VM_NAME "$vm"
 }
 
 show_config(){
@@ -197,12 +199,15 @@ Selected disk       : $disk
 QEMU device         : $device
 QEMU node           : $node
 Disk size           : $size
+Proxmox             : ${PVE_SSH_USER}@${PVE_HOST}:${PVE_SSH_PORT}
+Proxmox VMID        : $PVE_VMID
+Proxmox disk        : $PVE_DISK
+NBD port/export     : ${NBD_PORT}/${NBD_EXPORT}
 EOF
   if confirm "Write these detected values to config and continue with this VM?"; then
     write_key SRC_DISK "$disk"
     write_key QEMU_DEVICE "$device"
     write_key QEMU_NODE "$node"
-    [[ -n "${NBD_EXPORT:-}" ]] || write_key NBD_EXPORT "$VM_NAME"
     ok "Config updated: $CONFIG_FILE"
   else
     warn "Config not changed"
