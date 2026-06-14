@@ -2,7 +2,7 @@
 # kvm2pve source-side helper
 set -Eeuo pipefail
 
-VERSION="0.2.3"
+VERSION="0.2.4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -20,6 +20,7 @@ Usage:
   ./kvm2pve-src.sh discover [VM_NAME]
   ./kvm2pve-src.sh init
   ./kvm2pve-src.sh show
+  ./kvm2pve-src.sh preflight
   ./kvm2pve-src.sh tunnel
   ./kvm2pve-src.sh attach-target
   ./kvm2pve-src.sh bitmap
@@ -98,19 +99,32 @@ EOF
 }
 
 ensure_base_config(){
-  local vm_arg="${1:-}" vm pve_host pve_vmid pve_disk ssh_port
+  local vm_arg="${1:-}" vm old_vm pve_host pve_vmid pve_disk ssh_port
   if [[ -f "$CONFIG_FILE" ]]; then
-    vm="${vm_arg:-$(get_conf VM_NAME)}"
+    old_vm="$(get_conf VM_NAME)"
+    vm="${vm_arg:-$old_vm}"
     [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
     write_key VM_NAME "$vm"
+
+    if [[ -n "$old_vm" && "$vm" != "$old_vm" ]]; then
+      warn "VM changed from $old_vm to $vm; regenerating VM-specific values"
+      write_key SRC_DISK ""
+      write_key QEMU_DEVICE ""
+      write_key QEMU_NODE ""
+      write_key BITMAP "$(default_bitmap "$vm")"
+      write_key TARGET_NODE "$(default_target_node "$vm")"
+      write_key NBD_EXPORT "$vm"
+    else
+      [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP "$(default_bitmap "$vm")"
+      [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE "$(default_target_node "$vm")"
+      [[ -n "$(get_conf NBD_EXPORT)" ]] || write_key NBD_EXPORT "$vm"
+    fi
+
     [[ -n "$(get_conf PVE_SSH_USER)" ]] || write_key PVE_SSH_USER root
     [[ -n "$(get_conf PVE_SSH_PORT)" ]] || write_key PVE_SSH_PORT 22
     [[ -n "$(get_conf NBD_PORT)" ]] || write_key NBD_PORT 10809
-    [[ -n "$(get_conf NBD_EXPORT)" ]] || write_key NBD_EXPORT "$vm"
     [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
     [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
-    [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP "$(default_bitmap "$vm")"
-    [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE "$(default_target_node "$vm")"
   else
     vm="$vm_arg"
     [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
@@ -169,6 +183,33 @@ parse_info_block(){
   '
 }
 
+block_jobs_json(){ load_config; qmp '{"execute":"query-block-jobs"}'; }
+block_jobs_empty(){ ! block_jobs_json | grep -q '"type"'; }
+wait_jobs_empty(){
+  load_config
+  local out
+  while true; do
+    out="$(block_jobs_json)"
+    if ! printf '%s\n' "$out" | grep -q '"type"'; then
+      ok "No active block job"
+      return 0
+    fi
+    if printf '%s\n' "$out" | grep -q '"error"'; then
+      printf '%s\n' "$out"
+      die "Block job ended with an error"
+    fi
+    printf '%s\n' "$out" | awk '
+      /"offset"/ {gsub(/[^0-9]/,"",$2); offset=$2}
+      /"len"/ {gsub(/[^0-9]/,"",$2); len=$2}
+      /"status"/ {gsub(/[",]/,"",$2); status=$2}
+      END { if (len > 0) printf "Progress: %d%% | %s / %s | Status: %s\n", int((offset*100)/len), offset, len, status; else print "Block job running" }'
+    sleep 2
+  done
+}
+
+bitmap_exists(){ load_config; qmp '{"execute":"query-block"}' | grep -q "\"name\": \"$BITMAP\""; }
+target_node_exists(){ load_config; qmp '{"execute":"query-named-block-nodes"}' 2>/dev/null | grep -q "\"node-name\": \"$TARGET_NODE\""; }
+
 discover(){
   local vm_arg="${1:-}" existing_disk out detected count chosen device node disk size
   need virsh; need awk
@@ -194,8 +235,7 @@ discover(){
   size="$(blockdev --getsize64 "$disk" 2>/dev/null || stat -c %s "$disk" 2>/dev/null || echo unknown)"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"
-  TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"
+  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"; TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"; NBD_EXPORT="${NBD_EXPORT:-$VM_NAME}"
   cat <<EOF
 
 Detected values
@@ -220,10 +260,23 @@ EOF
     write_key QEMU_NODE "$node"
     write_key BITMAP "$BITMAP"
     write_key TARGET_NODE "$TARGET_NODE"
+    write_key NBD_EXPORT "$NBD_EXPORT"
     ok "Config updated: $CONFIG_FILE"
   else
     warn "Config not changed"
   fi
+}
+
+preflight(){
+  load_config; need virsh; need ssh
+  [[ "$TUNNEL_MODE" != "autossh" ]] || need autossh
+  virsh list --all | awk '{print $2}' | grep -qx "$VM_NAME" || die "VM not found in virsh: $VM_NAME"
+  virsh domstate "$VM_NAME" | grep -qE 'running|paused' || die "VM is not running/paused"
+  [[ -n "$SRC_DISK" && ( -b "$SRC_DISK" || -f "$SRC_DISK" ) ]] || die "SRC_DISK missing or invalid. Run discover."
+  [[ -n "$QEMU_DEVICE" && -n "$QEMU_NODE" ]] || die "QEMU_DEVICE/QEMU_NODE missing. Run discover."
+  [[ "$PVE_HOST" != "CHANGE_ME" ]] || die "Set PVE_HOST in $CONFIG_FILE"
+  ssh -p "$PVE_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "${PVE_SSH_USER}@${PVE_HOST}" "test -e '$PVE_DISK' && echo connected" >/dev/null || die "Cannot verify destination disk over SSH"
+  ok "Preflight checks passed"
 }
 
 start_tunnel(){
@@ -240,7 +293,12 @@ start_tunnel(){
 
 attach_target(){
   load_config; need virsh
-  qmp '{
+  if target_node_exists; then
+    ok "Target node already exists: $TARGET_NODE"
+    return 0
+  fi
+  local out
+  out="$(qmp '{
   "execute":"blockdev-add",
   "arguments":{
     "node-name":"'"$TARGET_NODE"'",
@@ -251,17 +309,27 @@ attach_target(){
       "export":"'"$NBD_EXPORT"'"
     }
   }
-}'
+}')"
+  printf '%s\n' "$out"
+  if printf '%s\n' "$out" | grep -q '"error"'; then die "blockdev-add failed"; fi
 }
 
 create_bitmap(){
   load_config; [[ -n "$QEMU_NODE" ]] || die "QEMU_NODE is empty. Run discover first."
-  qmp '{"execute":"block-dirty-bitmap-add","arguments":{"node":"'"$QEMU_NODE"'","name":"'"$BITMAP"'"}}'
+  if bitmap_exists; then
+    ok "Bitmap already exists: $BITMAP"
+    return 0
+  fi
+  local out
+  out="$(qmp '{"execute":"block-dirty-bitmap-add","arguments":{"node":"'"$QEMU_NODE"'","name":"'"$BITMAP"'"}}')"
+  printf '%s\n' "$out"
+  if printf '%s\n' "$out" | grep -q '"error"'; then die "block-dirty-bitmap-add failed"; fi
 }
 
 backup_job(){
   local sync="$1" job="$2" extra=""
   load_config; [[ -n "$QEMU_DEVICE" ]] || die "QEMU_DEVICE is empty. Run discover first."
+  if ! block_jobs_empty; then die "A block job is already present. Run watch/status first."; fi
   if [[ "$sync" == "incremental" ]]; then extra=',"bitmap":"'"$BITMAP"'"'; fi
   qmp '{
   "execute":"blockdev-backup",
@@ -313,19 +381,26 @@ final_cutover(){
   virsh suspend "$VM_NAME"
   virsh domstate "$VM_NAME"
   backup_job incremental final
-  ok "Final incremental started. Run: ./kvm2pve-src.sh watch"
+  wait_jobs_empty
+  ok "Final incremental completed"
 }
 
 cleanup(){
   load_config
   pkill -f "${NBD_PORT}:127.0.0.1:${NBD_PORT}.*${PVE_HOST}" >/dev/null 2>&1 || true
-  qmp '{"execute":"block-dirty-bitmap-remove","arguments":{"node":"'"$QEMU_NODE"'","name":"'"$BITMAP"'"}}' || true
+  if bitmap_exists; then
+    qmp '{"execute":"block-dirty-bitmap-remove","arguments":{"node":"'"$QEMU_NODE"'","name":"'"$BITMAP"'"}}' || true
+  fi
   ok "Source cleanup attempted"
 }
 
 stop_source(){
   load_config
   warn "This stops the source VM. Use only after final incremental completed."
+  if ! block_jobs_empty; then
+    block_jobs_json
+    die "Refusing to stop source VM while a block job is still present"
+  fi
   confirm "Destroy/stop source VM $VM_NAME now?" || die "Aborted"
   virsh destroy "$VM_NAME"
 }
@@ -335,6 +410,7 @@ case "$cmd" in
   init) init_config ;;
   discover) discover "${1:-}" ;;
   show) show_config ;;
+  preflight) preflight ;;
   tunnel) start_tunnel ;;
   attach-target) attach_target ;;
   bitmap) create_bitmap ;;
