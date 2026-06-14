@@ -1,40 +1,15 @@
-# Example configuration for kvm2pve
-
-SRC_VM_NAME=vm2365
-SRC_DISK=/dev/volgroup/kvm2365_img
-
-PVE_HOST=1.2.168.2
-PVE_SSH_USER=root
-SSH_PORT=22
-SSH_KEY=
-SSH_OPTS=
-
-PVE_TARGET_DISK=/dev/volgroup/vsv2365-lv
-
-PVE_VMID=2365
-PVE_VM_NAME=vm2365
-PVE_RAM_MB=4096
-PVE_CORES=2
-
-PVE_BRIDGE=vmbr0
-PVE_NET_MODEL=virtio
-PVE_MAC=
-PVE_OS_TYPE=l26
-PVE_SCSI_HW=virtio-scsi-pci
-PVE_BOOT_DISK=scsi0
-
-# direct | volume | args
-PVE_ATTACH_MODE=direct
-PVE_DISK_REF=/dev/volgroup/vsv2365-lv
-
-CREATE_PVE_VM=yes
-START_PVE_VM=yes
-
-# autossh | ssh | direct
-TUNNEL_MODE=autossh
-NBD_PORT=10809
-AUTOSSH_MONITOR_PORT=20000
-
-INSTALL_PACKAGES=yes
-AUTO_CLEANUP_TUNNEL=yes
-AUTO_STOP_NBD=yes
+# Legacy config.example
+#
+# This file belonged to the old blockcopy workflow.
+# The current workflow uses:
+#
+#   examples/kvm2pve.env.example
+#
+# Copy it as:
+#
+#   cp examples/kvm2pve.env.example kvm2pve.env
+#
+# Then use:
+#
+#   kvm2pve-src.sh on the source KVM host
+#   kvm2pve-dst.sh on the destination Proxmox host
