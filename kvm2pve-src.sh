@@ -2,7 +2,7 @@
 # kvm2pve source-side helper
 set -Eeuo pipefail
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -17,8 +17,8 @@ usage(){ cat <<EOF
 kvm2pve-src.sh v${VERSION}
 
 Usage:
+  ./kvm2pve-src.sh discover [VM_NAME]
   ./kvm2pve-src.sh init
-  ./kvm2pve-src.sh discover
   ./kvm2pve-src.sh show
   ./kvm2pve-src.sh tunnel
   ./kvm2pve-src.sh attach-target
@@ -30,6 +30,9 @@ Usage:
   ./kvm2pve-src.sh status
   ./kvm2pve-src.sh cleanup
   ./kvm2pve-src.sh stop-source
+
+Recommended first run:
+  ./kvm2pve-src.sh discover kvm3023
 EOF
 }
 
@@ -37,7 +40,7 @@ ask(){ local var="$1" prompt="$2" def="${3:-}" val; read -r -p "$prompt${def:+ [
 confirm(){ local prompt="$1" ans; read -r -p "$prompt [yes/no]: " ans; [[ "$ans" == "yes" ]]; }
 
 load_config(){
-  [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE. Run: ./kvm2pve-src.sh init"
+  [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE. Run: ./kvm2pve-src.sh discover VM_NAME"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
   : "${VM_NAME:?}"; : "${PVE_HOST:?}"; : "${PVE_SSH_USER:=root}"; : "${PVE_SSH_PORT:=22}"; : "${PVE_VMID:?}"; : "${PVE_DISK:?}"
@@ -52,6 +55,7 @@ load_config(){
   AUTOSSH_MONITOR_PORT="${AUTOSSH_MONITOR_PORT:-20000}"
 }
 
+get_conf(){ local key="$1"; [[ -f "$CONFIG_FILE" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$CONFIG_FILE"; }
 write_key(){
   local key="$1" val="$2" tmp
   tmp="$(mktemp)"
@@ -92,6 +96,43 @@ EOF
   ok "Config written: $CONFIG_FILE"
 }
 
+ensure_base_config(){
+  local vm_arg="${1:-}" vm pve_host pve_vmid pve_disk pve_user ssh_port nbd_port nbd_export
+  if [[ -f "$CONFIG_FILE" ]]; then
+    vm="${vm_arg:-$(get_conf VM_NAME)}"
+    [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
+  else
+    vm="$vm_arg"
+    [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
+    ask pve_host "Proxmox host/IP" "CHANGE_ME"
+    ask pve_vmid "Destination Proxmox VMID" "2672"
+    ask pve_disk "Destination disk path" "/dev/pve/vm-${pve_vmid}-disk-0"
+    ask pve_user "Proxmox SSH user" "root"
+    ask ssh_port "Proxmox SSH port" "22"
+    ask nbd_port "NBD port" "10809"
+    ask nbd_export "NBD export name" "$vm"
+    cat > "$CONFIG_FILE" <<EOF
+VM_NAME=$vm
+SRC_DISK=
+QEMU_DEVICE=
+QEMU_NODE=
+BITMAP=kvm2pve
+TARGET_NODE=kvm2pve-target
+PVE_HOST=$pve_host
+PVE_SSH_USER=$pve_user
+PVE_SSH_PORT=$ssh_port
+PVE_VMID=$pve_vmid
+PVE_DISK=$pve_disk
+NBD_PORT=$nbd_port
+NBD_EXPORT=$nbd_export
+TUNNEL_MODE=autossh
+AUTOSSH_MONITOR_PORT=20000
+EOF
+    chmod 600 "$CONFIG_FILE"
+  fi
+  write_key VM_NAME "$vm"
+}
+
 show_config(){
   load_config
   cat <<EOF
@@ -123,16 +164,20 @@ parse_info_block(){
 }
 
 discover(){
-  load_config; need virsh; need awk
+  local vm_arg="${1:-}" existing_disk out detected count chosen device node disk size
+  need virsh; need awk
+  ensure_base_config "$vm_arg"
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  existing_disk="${SRC_DISK:-}"
   info "Reading QEMU info block for $VM_NAME"
-  local out detected count chosen device node disk size
   out="$(virsh qemu-monitor-command "$VM_NAME" --hmp "info block")"
   echo "$out"
   detected="$(printf '%s\n' "$out" | parse_info_block)"
   [[ -n "$detected" ]] || die "Could not parse info block output"
   count="$(printf '%s\n' "$detected" | wc -l | awk '{print $1}')"
-  if [[ -n "$SRC_DISK" ]]; then
-    chosen="$(printf '%s\n' "$detected" | awk -F '\t' -v d="$SRC_DISK" '$3==d {print; exit}')"
+  if [[ -n "$existing_disk" ]]; then
+    chosen="$(printf '%s\n' "$detected" | awk -F '\t' -v d="$existing_disk" '$3==d {print; exit}')"
     [[ -n "$chosen" ]] || chosen="$(printf '%s\n' "$detected" | head -n1)"
   else
     chosen="$(printf '%s\n' "$detected" | head -n1)"
@@ -145,18 +190,20 @@ discover(){
 
 Detected values
 ---------------
+Config file         : $CONFIG_FILE
+VM name             : $VM_NAME
 Block devices found : $count
 Selected disk       : $disk
 QEMU device         : $device
 QEMU node           : $node
 Disk size           : $size
 EOF
-  if confirm "Write these detected values to $CONFIG_FILE?"; then
+  if confirm "Write these detected values to config and continue with this VM?"; then
     write_key SRC_DISK "$disk"
     write_key QEMU_DEVICE "$device"
     write_key QEMU_NODE "$node"
-    write_key NBD_EXPORT "${NBD_EXPORT:-$VM_NAME}"
-    ok "Config updated"
+    [[ -n "${NBD_EXPORT:-}" ]] || write_key NBD_EXPORT "$VM_NAME"
+    ok "Config updated: $CONFIG_FILE"
   else
     warn "Config not changed"
   fi
@@ -266,10 +313,10 @@ stop_source(){
   virsh destroy "$VM_NAME"
 }
 
-cmd="${1:-}"
+cmd="${1:-}"; shift || true
 case "$cmd" in
   init) init_config ;;
-  discover) discover ;;
+  discover) discover "${1:-}" ;;
   show) show_config ;;
   tunnel) start_tunnel ;;
   attach-target) attach_target ;;
