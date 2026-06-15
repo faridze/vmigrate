@@ -2,7 +2,7 @@
 # kvm2pve source-side helper
 set -Eeuo pipefail
 
-VERSION="0.2.4"
+VERSION="0.2.5"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -22,6 +22,8 @@ Usage:
   ./kvm2pve-src.sh show
   ./kvm2pve-src.sh preflight
   ./kvm2pve-src.sh tunnel
+  ./kvm2pve-src.sh tunnel-check
+  ./kvm2pve-src.sh tunnel-status
   ./kvm2pve-src.sh attach-target
   ./kvm2pve-src.sh bitmap
   ./kvm2pve-src.sh full
@@ -287,8 +289,24 @@ start_tunnel(){
   pkill -f "${NBD_PORT}:127.0.0.1:${NBD_PORT}.*${PVE_HOST}" >/dev/null 2>&1 || true
   local args=(-f -N -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -L "${NBD_PORT}:127.0.0.1:${NBD_PORT}" -p "$PVE_SSH_PORT" "${PVE_SSH_USER}@${PVE_HOST}")
   if [[ "$TUNNEL_MODE" == "autossh" ]]; then autossh -M "$AUTOSSH_MONITOR_PORT" "${args[@]}"; else ssh "${args[@]}"; fi
-  ok "Tunnel started: localhost:${NBD_PORT} -> ${PVE_HOST}:127.0.0.1:${NBD_PORT}"
-  qemu-img info "nbd:localhost:${NBD_PORT}:exportname=${NBD_EXPORT}" || warn "qemu-img info failed; check destination export"
+  ok "Tunnel command sent..."
+  echo "Run next: ./kvm2pve-src.sh tunnel-check"
+}
+
+tunnel_check(){
+  load_config; need ss; need qemu-img
+  ss -lntp | grep "127.0.0.1:${NBD_PORT}" >/dev/null || die "No local tunnel listener on 127.0.0.1:${NBD_PORT}"
+  qemu-img info "nbd:127.0.0.1:${NBD_PORT}:exportname=${NBD_EXPORT}"
+  ok "Tunnel and NBD export are reachable"
+}
+
+tunnel_status(){
+  load_config
+  echo "Expected local listener: 127.0.0.1:${NBD_PORT}"
+  ss -lntp | grep "${NBD_PORT}" || true
+  echo
+  echo "Manual check command:"
+  echo "qemu-img info \"nbd:127.0.0.1:${NBD_PORT}:exportname=${NBD_EXPORT}\""
 }
 
 attach_target(){
@@ -412,6 +430,8 @@ case "$cmd" in
   show) show_config ;;
   preflight) preflight ;;
   tunnel) start_tunnel ;;
+  tunnel-check) tunnel_check ;;
+  tunnel-status) tunnel_status ;;
   attach-target) attach_target ;;
   bitmap) create_bitmap ;;
   full) backup_job full full ;;

@@ -73,34 +73,40 @@ You can also run without an argument and let it ask the VM name:
 ./kvm2pve-src.sh discover
 ```
 
-## Destination Proxmox
+## Migration workflow
 
-Copy or create the same `kvm2pve.env` on the destination host, then run:
+Destination:
 
 ```bash
+./kvm2pve-dst.sh discover 2679
 ./kvm2pve-dst.sh show
+./kvm2pve-dst.sh preflight
 ./kvm2pve-dst.sh export
 ```
 
-## Source workflow
-
-After destination export is ready:
+Source:
 
 ```bash
+./kvm2pve-src.sh discover kvm3023
+./kvm2pve-src.sh show
+./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-status
+./kvm2pve-src.sh tunnel-check
 ./kvm2pve-src.sh attach-target
 ./kvm2pve-src.sh bitmap
 ./kvm2pve-src.sh full
 ./kvm2pve-src.sh watch
 ```
 
-When full sync is completed:
+Cutover:
 
 ```bash
 ./kvm2pve-src.sh final
+./kvm2pve-src.sh stop-source
 ```
 
-Then on destination:
+Destination:
 
 ```bash
 ./kvm2pve-dst.sh close
@@ -114,6 +120,8 @@ Then on destination:
 ./kvm2pve-src.sh init
 ./kvm2pve-src.sh show
 ./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-status
+./kvm2pve-src.sh tunnel-check
 ./kvm2pve-src.sh attach-target
 ./kvm2pve-src.sh bitmap
 ./kvm2pve-src.sh full
@@ -151,17 +159,18 @@ Do not shut down the source VM before final incremental. If QEMU exits, QMP disa
 2. Run source discovery and confirm config
 3. Export destination disk with qemu-nbd
 4. Create SSH tunnel from source to destination NBD
-5. Add destination NBD as QEMU block node
-6. Create dirty bitmap on source disk node
-7. Run full sync while VM is running
-8. Wait until full sync completes
-9. Lock customer panel controls
-10. Suspend source VM
-11. Run final incremental
-12. Stop source VM
-13. Close qemu-nbd export
-14. Boot destination VM
-15. Validate guest services
+5. Check tunnel status and validate the NBD export
+6. Add destination NBD as QEMU block node
+7. Create dirty bitmap on source disk node
+8. Run full sync while VM is running
+9. Wait until full sync completes
+10. Lock customer panel controls
+11. Suspend source VM
+12. Run final incremental
+13. Stop source VM
+14. Close qemu-nbd export
+15. Boot destination VM
+16. Validate guest services
 ```
 
 ## Monitoring without jq
