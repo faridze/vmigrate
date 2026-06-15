@@ -124,13 +124,14 @@ Destination:
 ./kvm2pve-src.sh discover [VM_NAME]
 ./kvm2pve-src.sh init
 ./kvm2pve-src.sh show
+./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh tunnel
 ./kvm2pve-src.sh tunnel-status
 ./kvm2pve-src.sh tunnel-check
-./kvm2pve-src.sh check-target
-./kvm2pve-src.sh check-bitmap
 ./kvm2pve-src.sh attach-target
+./kvm2pve-src.sh check-target
 ./kvm2pve-src.sh bitmap
+./kvm2pve-src.sh check-bitmap
 ./kvm2pve-src.sh full
 ./kvm2pve-src.sh incremental
 ./kvm2pve-src.sh final
