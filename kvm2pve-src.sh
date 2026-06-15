@@ -30,6 +30,7 @@ Usage:
   ./kvm2pve-src.sh check-bitmap
   ./kvm2pve-src.sh full
   ./kvm2pve-src.sh incremental
+  ./kvm2pve-src.sh check-paused
   ./kvm2pve-src.sh final
   ./kvm2pve-src.sh watch
   ./kvm2pve-src.sh status
@@ -244,6 +245,37 @@ check_bitmap(){
   verify_bitmap
 }
 
+vm_state(){
+  virsh domstate "$VM_NAME" | tr '[:upper:]' '[:lower:]' | awk '{print $1}'
+}
+
+wait_vm_paused(){
+  load_config
+
+  local state i
+
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    state="$(vm_state || true)"
+
+    case "$state" in
+      paused|pmsuspended)
+        ok "VM paused successfully: $state"
+        return 0
+        ;;
+    esac
+
+    sleep 1
+  done
+
+  state="$(vm_state || true)"
+  die "VM is not paused. Refusing final cutover. Current state: ${state:-unknown}"
+}
+
+check_paused(){
+  load_config
+  wait_vm_paused
+}
+
 discover(){
   local vm_arg="${1:-}" existing_disk out detected count chosen device node disk size
   need virsh; need awk
@@ -455,8 +487,8 @@ final_cutover(){
   load_config
   warn "Before final cutover, lock customer/Virtualizor panel controls."
   confirm "Suspend source VM and run FINAL incremental now?" || die "Aborted"
-  virsh suspend "$VM_NAME"
-  virsh domstate "$VM_NAME"
+  virsh suspend "$VM_NAME" || die "virsh suspend failed"
+  wait_vm_paused
   backup_job incremental final
   wait_jobs_empty
   ok "Final incremental completed"
@@ -497,6 +529,7 @@ case "$cmd" in
   check-bitmap) check_bitmap ;;
   full) backup_job full full ;;
   incremental) backup_job incremental inc1 ;;
+  check-paused) check_paused ;;
   final) final_cutover ;;
   watch) watch_jobs ;;
   status) status ;;

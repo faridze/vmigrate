@@ -107,6 +107,7 @@ Source:
 Cutover:
 
 ```bash
+./kvm2pve-src.sh check-paused
 ./kvm2pve-src.sh final
 ./kvm2pve-src.sh stop-source
 ```
@@ -174,11 +175,12 @@ Do not shut down the source VM before final incremental. If QEMU exits, QMP disa
 9. Wait until full sync completes
 10. Lock customer panel controls
 11. Suspend source VM
-12. Run final incremental
-13. Stop source VM
-14. Close qemu-nbd export
-15. Boot destination VM
-16. Validate guest services
+12. Verify source VM is paused
+13. Run final incremental
+14. Stop source VM
+15. Close qemu-nbd export
+16. Boot destination VM
+17. Validate guest services
 ```
 
 ## Monitoring without jq
