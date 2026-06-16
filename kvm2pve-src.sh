@@ -21,6 +21,7 @@ Usage:
   ./kvm2pve-src.sh init
   ./kvm2pve-src.sh show
   ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
+  ./kvm2pve-src.sh quick [HANDOFF_TOKEN]
   ./kvm2pve-src.sh quick [VM_NAME] [HANDOFF_TOKEN]
   ./kvm2pve-src.sh next
   ./kvm2pve-src.sh preflight
@@ -41,7 +42,7 @@ Usage:
   ./kvm2pve-src.sh stop-source
 
 Recommended first run:
-  ./kvm2pve-src.sh quick kvm3023 HANDOFF_TOKEN
+  ./kvm2pve-src.sh quick HANDOFF_TOKEN
 EOF
 }
 
@@ -121,7 +122,6 @@ ensure_base_config(){
       write_key QEMU_NODE ""
       write_key BITMAP "$(default_bitmap "$vm")"
       write_key TARGET_NODE "$(default_target_node "$vm")"
-      write_key NBD_EXPORT "vm-$(get_conf PVE_VMID)"
     else
       [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP "$(default_bitmap "$vm")"
       [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE "$(default_target_node "$vm")"
@@ -230,6 +230,27 @@ conf_present(){ [[ -n "$(get_conf "$1")" ]]; }
 conf_value(){ local val; val="$(get_conf "$1")"; printf '%s' "${val:-$2}"; }
 status_word(){ if "$@"; then printf 'yes'; else printf 'no'; fi; }
 
+prompt_source_vm(){
+  local current_vm vm
+  current_vm="$(conf_value VM_NAME kvm3023)"
+  ask vm "Source VM name" "$current_vm"
+  printf '%s' "$vm"
+}
+
+prompt_pve_connection(){
+  local pve_host ssh_port
+
+  pve_host="$(conf_value PVE_HOST CHANGE_ME)"
+  ask pve_host "Proxmox host/IP" "$pve_host"
+  write_key PVE_HOST "$pve_host"
+
+  ssh_port="$(conf_value PVE_SSH_PORT 22)"
+  ask ssh_port "Proxmox SSH port" "$ssh_port"
+  write_key PVE_SSH_PORT "$ssh_port"
+
+  [[ -n "$(get_conf PVE_SSH_USER)" ]] || write_key PVE_SSH_USER root
+}
+
 source_discovered(){ conf_present SRC_DISK && conf_present QEMU_DEVICE && conf_present QEMU_NODE; }
 handoff_applied(){ conf_present PVE_VMID && conf_present PVE_DISK && conf_present NBD_PORT && conf_present NBD_EXPORT; }
 pve_host_set(){ local host; host="$(get_conf PVE_HOST)"; [[ -n "$host" && "$host" != "CHANGE_ME" ]]; }
@@ -301,16 +322,14 @@ quick_start(){
     vm_arg=""
   fi
 
-  if [[ -n "$vm_arg" || ! source_discovered ]]; then
-    discover "$vm_arg"
-  else
-    info "Using existing source discovery in $CONFIG_FILE"
-  fi
-
   if [[ -n "$token" ]]; then
     apply_handoff "$token"
+    [[ -n "$vm_arg" ]] || vm_arg="$(prompt_source_vm)"
+    prompt_pve_connection
+    discover "$vm_arg"
   else
     warn "No handoff token supplied; run apply-handoff before preflight if destination values changed"
+    discover "$vm_arg"
   fi
 
   show_config
@@ -451,7 +470,7 @@ discover(){
   size="$(blockdev --getsize64 "$disk" 2>/dev/null || stat -c %s "$disk" 2>/dev/null || echo unknown)"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"; TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"; NBD_EXPORT="vm-${PVE_VMID}"
+  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"; TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"; NBD_EXPORT="${NBD_EXPORT:-vm-${PVE_VMID}}"
   cat <<EOF
 
 Detected values

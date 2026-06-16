@@ -86,7 +86,7 @@ Destination:
 Source:
 
 ```bash
-./kvm2pve-src.sh quick kvm3023 'KVM2PVE_HANDOFF_V1:...'
+./kvm2pve-src.sh quick 'KVM2PVE_HANDOFF_V1:...'
 ./kvm2pve-src.sh next
 ```
 
@@ -181,6 +181,7 @@ Destination:
 ./kvm2pve-src.sh init
 ./kvm2pve-src.sh show
 ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
+./kvm2pve-src.sh quick [HANDOFF_TOKEN]
 ./kvm2pve-src.sh quick [VM_NAME] [HANDOFF_TOKEN]
 ./kvm2pve-src.sh next
 ./kvm2pve-src.sh preflight
