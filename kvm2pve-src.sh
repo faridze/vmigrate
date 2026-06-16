@@ -60,7 +60,7 @@ load_config(){
   BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"
   TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"
   NBD_PORT="${NBD_PORT:-10809}"
-  NBD_EXPORT="${NBD_EXPORT:-$VM_NAME}"
+  NBD_EXPORT="${NBD_EXPORT:-vm-${PVE_VMID}}"
   TUNNEL_MODE="${TUNNEL_MODE:-autossh}"
   AUTOSSH_MONITOR_PORT="${AUTOSSH_MONITOR_PORT:-20000}"
 }
@@ -95,7 +95,7 @@ PVE_SSH_PORT=$ssh_port
 PVE_VMID=$pve_vmid
 PVE_DISK=$pve_disk
 NBD_PORT=10809
-NBD_EXPORT=$vm
+NBD_EXPORT=vm-${pve_vmid}
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
 EOF
@@ -118,11 +118,11 @@ ensure_base_config(){
       write_key QEMU_NODE ""
       write_key BITMAP "$(default_bitmap "$vm")"
       write_key TARGET_NODE "$(default_target_node "$vm")"
-      write_key NBD_EXPORT "$vm"
+      write_key NBD_EXPORT "vm-$(get_conf PVE_VMID)"
     else
       [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP "$(default_bitmap "$vm")"
       [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE "$(default_target_node "$vm")"
-      [[ -n "$(get_conf NBD_EXPORT)" ]] || write_key NBD_EXPORT "$vm"
+      [[ -n "$(get_conf NBD_EXPORT)" ]] || write_key NBD_EXPORT "vm-$(get_conf PVE_VMID)"
     fi
 
     [[ -n "$(get_conf PVE_SSH_USER)" ]] || write_key PVE_SSH_USER root
@@ -150,7 +150,7 @@ PVE_SSH_PORT=$ssh_port
 PVE_VMID=$pve_vmid
 PVE_DISK=$pve_disk
 NBD_PORT=10809
-NBD_EXPORT=$vm
+NBD_EXPORT=vm-${pve_vmid}
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
 EOF
@@ -301,7 +301,7 @@ discover(){
   size="$(blockdev --getsize64 "$disk" 2>/dev/null || stat -c %s "$disk" 2>/dev/null || echo unknown)"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"; TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"; NBD_EXPORT="${NBD_EXPORT:-$VM_NAME}"
+  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"; TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"; NBD_EXPORT="${NBD_EXPORT:-vm-${PVE_VMID}}"
   cat <<EOF
 
 Detected values
