@@ -20,6 +20,7 @@ Usage:
   ./kvm2pve-src.sh discover [VM_NAME]
   ./kvm2pve-src.sh init
   ./kvm2pve-src.sh show
+  ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
   ./kvm2pve-src.sh preflight
   ./kvm2pve-src.sh tunnel
   ./kvm2pve-src.sh tunnel-status
@@ -172,6 +173,54 @@ Proxmox VMID   : $PVE_VMID
 Proxmox disk   : $PVE_DISK
 NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 Tunnel mode    : $TUNNEL_MODE
+EOF
+}
+
+apply_handoff(){
+  local token="${1:-}" prefix="KVM2PVE_HANDOFF_V1:" payload decoded line key val
+  local handoff_pve_vmid="" handoff_pve_disk="" handoff_nbd_port="" handoff_nbd_export=""
+
+  [[ -n "$token" ]] || die "Missing handoff token"
+  [[ "$token" == "$prefix"* ]] || die "Invalid handoff token prefix"
+  need base64
+
+  payload="${token#"$prefix"}"
+  [[ -n "$payload" ]] || die "Missing handoff payload"
+  decoded="$(printf '%s' "$payload" | base64 -d 2>/dev/null)" || die "Failed to decode handoff payload"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" == *=* ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    case "$key" in
+      PVE_VMID) handoff_pve_vmid="$val" ;;
+      PVE_DISK) handoff_pve_disk="$val" ;;
+      NBD_PORT) handoff_nbd_port="$val" ;;
+      NBD_EXPORT) handoff_nbd_export="$val" ;;
+      *) ;;
+    esac
+  done <<EOF
+$decoded
+EOF
+
+  [[ -n "$handoff_pve_vmid" ]] || die "Handoff payload missing PVE_VMID"
+  [[ -n "$handoff_pve_disk" ]] || die "Handoff payload missing PVE_DISK"
+  [[ -n "$handoff_nbd_port" ]] || handoff_nbd_port="10809"
+  [[ -n "$handoff_nbd_export" ]] || handoff_nbd_export="vm-${handoff_pve_vmid}"
+
+  write_key PVE_VMID "$handoff_pve_vmid"
+  write_key PVE_DISK "$handoff_pve_disk"
+  write_key NBD_PORT "$handoff_nbd_port"
+  write_key NBD_EXPORT "$handoff_nbd_export"
+
+  cat <<EOF
+Applied handoff
+---------------
+PVE_VMID=$handoff_pve_vmid
+PVE_DISK=$handoff_pve_disk
+NBD_PORT=$handoff_nbd_port
+NBD_EXPORT=$handoff_nbd_export
 EOF
 }
 
@@ -519,6 +568,7 @@ case "$cmd" in
   init) init_config ;;
   discover) discover "${1:-}" ;;
   show) show_config ;;
+  apply-handoff) apply_handoff "${1:-}" ;;
   preflight) preflight ;;
   tunnel) start_tunnel ;;
   tunnel-status) tunnel_status ;;

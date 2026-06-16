@@ -20,6 +20,7 @@ Usage:
   ./kvm2pve-dst.sh discover [VMID]
   ./kvm2pve-dst.sh init
   ./kvm2pve-dst.sh show
+  ./kvm2pve-dst.sh handoff
   ./kvm2pve-dst.sh preflight
   ./kvm2pve-dst.sh export
   ./kvm2pve-dst.sh close
@@ -168,6 +169,17 @@ NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 EOF
 }
 
+handoff_token(){
+  load_config
+  need base64
+  {
+    printf 'PVE_VMID=%s\n' "$PVE_VMID"
+    printf 'PVE_DISK=%s\n' "$PVE_DISK"
+    printf 'NBD_PORT=%s\n' "$NBD_PORT"
+    printf 'NBD_EXPORT=%s\n' "$NBD_EXPORT"
+  } | base64 | tr -d '\r\n' | sed 's/^/KVM2PVE_HANDOFF_V1:/'
+}
+
 port_in_use(){ ss -lntp | grep -q "127.0.0.1:${NBD_PORT}"; }
 
 preflight(){
@@ -225,6 +237,7 @@ case "$cmd" in
   discover) discover_config "${1:-}" ;;
   init) init_config ;;
   show) show_config ;;
+  handoff) handoff_token ;;
   preflight) preflight ;;
   export) export_disk ;;
   close) close_export ;;

@@ -73,12 +73,45 @@ You can also run without an argument and let it ask the VM name:
 ./kvm2pve-src.sh discover
 ```
 
+## Quick handoff workflow
+
+Use `handoff` after destination discovery to copy only the destination values
+that the source must match: `PVE_VMID`, `PVE_DISK`, `NBD_PORT`, and
+`NBD_EXPORT`.
+
+Destination:
+
+```bash
+./kvm2pve-dst.sh discover 2679
+./kvm2pve-dst.sh handoff
+```
+
+Example output:
+
+```text
+KVM2PVE_HANDOFF_V1:UFZFX1ZNSUQ9MjY3OQpQVkVfRElTSz0vZGV2L3B2ZS92bS0yNjc5LXh4eHgKTkJEX1BPUlQ9MTA4MDkKTkJEX0VYUE9SVD12bS0yNjc5Cg==
+```
+
+Source:
+
+```bash
+./kvm2pve-src.sh discover kvm3023
+./kvm2pve-src.sh apply-handoff 'KVM2PVE_HANDOFF_V1:UFZFX1ZNSUQ9MjY3OQpQVkVfRElTSz0vZGV2L3B2ZS92bS0yNjc5LXh4eHgKTkJEX1BPUlQ9MTA4MDkKTkJEX0VYUE9SVD12bS0yNjc5Cg=='
+./kvm2pve-src.sh show
+```
+
+`apply-handoff` updates only `PVE_VMID`, `PVE_DISK`, `NBD_PORT`, and
+`NBD_EXPORT` in `kvm2pve.env`. It does not overwrite source-side values such
+as `VM_NAME`, `SRC_DISK`, `QEMU_DEVICE`, `QEMU_NODE`, `BITMAP`, or
+`TARGET_NODE`, and it does not set `PVE_HOST` or `PVE_SSH_PORT`.
+
 ## Migration workflow
 
 Destination:
 
 ```bash
 ./kvm2pve-dst.sh discover 2679
+./kvm2pve-dst.sh handoff
 ./kvm2pve-dst.sh show
 ./kvm2pve-dst.sh preflight
 ./kvm2pve-dst.sh export
@@ -88,6 +121,7 @@ Source:
 
 ```bash
 ./kvm2pve-src.sh discover kvm3023
+./kvm2pve-src.sh apply-handoff 'KVM2PVE_HANDOFF_V1:...'
 ./kvm2pve-src.sh show
 ./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh tunnel
@@ -125,6 +159,7 @@ Destination:
 ./kvm2pve-src.sh discover [VM_NAME]
 ./kvm2pve-src.sh init
 ./kvm2pve-src.sh show
+./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
 ./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh tunnel
 ./kvm2pve-src.sh tunnel-status
@@ -135,6 +170,7 @@ Destination:
 ./kvm2pve-src.sh check-bitmap
 ./kvm2pve-src.sh full
 ./kvm2pve-src.sh incremental
+./kvm2pve-src.sh check-paused
 ./kvm2pve-src.sh final
 ./kvm2pve-src.sh watch
 ./kvm2pve-src.sh status
@@ -145,8 +181,11 @@ Destination:
 ## Destination commands
 
 ```bash
+./kvm2pve-dst.sh discover [VMID]
 ./kvm2pve-dst.sh init
 ./kvm2pve-dst.sh show
+./kvm2pve-dst.sh handoff
+./kvm2pve-dst.sh preflight
 ./kvm2pve-dst.sh export
 ./kvm2pve-dst.sh close
 ./kvm2pve-dst.sh boot
