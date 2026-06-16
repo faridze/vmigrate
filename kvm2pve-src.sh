@@ -21,6 +21,8 @@ Usage:
   ./kvm2pve-src.sh init
   ./kvm2pve-src.sh show
   ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
+  ./kvm2pve-src.sh quick [VM_NAME] [HANDOFF_TOKEN]
+  ./kvm2pve-src.sh next
   ./kvm2pve-src.sh preflight
   ./kvm2pve-src.sh tunnel
   ./kvm2pve-src.sh tunnel-status
@@ -39,7 +41,7 @@ Usage:
   ./kvm2pve-src.sh stop-source
 
 Recommended first run:
-  ./kvm2pve-src.sh discover kvm3023
+  ./kvm2pve-src.sh quick kvm3023 HANDOFF_TOKEN
 EOF
 }
 
@@ -222,6 +224,105 @@ PVE_DISK=$handoff_pve_disk
 NBD_PORT=$handoff_nbd_port
 NBD_EXPORT=$handoff_nbd_export
 EOF
+}
+
+conf_present(){ [[ -n "$(get_conf "$1")" ]]; }
+conf_value(){ local val; val="$(get_conf "$1")"; printf '%s' "${val:-$2}"; }
+status_word(){ if "$@"; then printf 'yes'; else printf 'no'; fi; }
+
+source_discovered(){ conf_present SRC_DISK && conf_present QEMU_DEVICE && conf_present QEMU_NODE; }
+handoff_applied(){ conf_present PVE_VMID && conf_present PVE_DISK && conf_present NBD_PORT && conf_present NBD_EXPORT; }
+pve_host_set(){ local host; host="$(get_conf PVE_HOST)"; [[ -n "$host" && "$host" != "CHANGE_ME" ]]; }
+
+next_steps(){
+  local vm pve_host
+
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    cat <<EOF
+Current state
+-------------
+Config file : missing
+
+Next:
+./kvm2pve-src.sh discover VM_NAME
+EOF
+    return 0
+  fi
+
+  vm="$(conf_value VM_NAME VM_NAME)"
+  pve_host="$(conf_value PVE_HOST CHANGE_ME)"
+
+  cat <<EOF
+Current state
+-------------
+Config file       : $CONFIG_FILE
+VM name           : $vm
+Source discovered : $(status_word source_discovered)
+Handoff applied   : $(status_word handoff_applied)
+Proxmox host set  : $(status_word pve_host_set) ($pve_host)
+
+Suggested next
+--------------
+EOF
+
+  if ! conf_present VM_NAME; then
+    echo "./kvm2pve-src.sh discover VM_NAME"
+  elif ! source_discovered; then
+    echo "./kvm2pve-src.sh discover $vm"
+  elif ! handoff_applied; then
+    echo "./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN"
+  elif ! pve_host_set; then
+    echo "Set PVE_HOST in $CONFIG_FILE, then run: ./kvm2pve-src.sh preflight"
+  else
+    cat <<EOF
+./kvm2pve-src.sh preflight
+./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-check
+./kvm2pve-src.sh attach-target
+./kvm2pve-src.sh check-target
+./kvm2pve-src.sh bitmap
+./kvm2pve-src.sh check-bitmap
+./kvm2pve-src.sh full
+./kvm2pve-src.sh watch
+
+Final cutover stays explicit:
+./kvm2pve-src.sh check-paused
+./kvm2pve-src.sh final
+./kvm2pve-src.sh stop-source
+EOF
+  fi
+}
+
+quick_start(){
+  local vm_arg="${1:-}" token="${2:-}"
+
+  if [[ "$vm_arg" == KVM2PVE_HANDOFF_V1:* && -z "$token" ]]; then
+    token="$vm_arg"
+    vm_arg=""
+  fi
+
+  if [[ -n "$vm_arg" || ! source_discovered ]]; then
+    discover "$vm_arg"
+  else
+    info "Using existing source discovery in $CONFIG_FILE"
+  fi
+
+  if [[ -n "$token" ]]; then
+    apply_handoff "$token"
+  else
+    warn "No handoff token supplied; run apply-handoff before preflight if destination values changed"
+  fi
+
+  show_config
+
+  if confirm "Run source preflight now?"; then
+    preflight
+  else
+    warn "Preflight skipped"
+  fi
+
+  echo
+  next_steps
 }
 
 qmp(){ local json="$1"; virsh qemu-monitor-command "$VM_NAME" --pretty "$json"; }
@@ -569,6 +670,8 @@ case "$cmd" in
   discover) discover "${1:-}" ;;
   show) show_config ;;
   apply-handoff) apply_handoff "${1:-}" ;;
+  quick) quick_start "${1:-}" "${2:-}" ;;
+  next) next_steps ;;
   preflight) preflight ;;
   tunnel) start_tunnel ;;
   tunnel-status) tunnel_status ;;

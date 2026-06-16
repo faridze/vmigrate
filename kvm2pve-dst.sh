@@ -21,6 +21,7 @@ Usage:
   ./kvm2pve-dst.sh init
   ./kvm2pve-dst.sh show
   ./kvm2pve-dst.sh handoff
+  ./kvm2pve-dst.sh quick [VMID]
   ./kvm2pve-dst.sh preflight
   ./kvm2pve-dst.sh export
   ./kvm2pve-dst.sh close
@@ -28,7 +29,7 @@ Usage:
   ./kvm2pve-dst.sh status
 
 Recommended first run:
-  ./kvm2pve-dst.sh discover 2672
+  ./kvm2pve-dst.sh quick 2672
 EOF
 }
 
@@ -180,6 +181,41 @@ handoff_token(){
   } | base64 | tr -d '\r\n' | sed 's/^/KVM2PVE_HANDOFF_V1:/'
 }
 
+quick_start(){
+  local vmid_arg="${1:-}" token
+
+  if [[ -n "$vmid_arg" || ! -f "$CONFIG_FILE" ]]; then
+    discover_config "$vmid_arg"
+  else
+    info "Using existing destination config: $CONFIG_FILE"
+  fi
+
+  load_config
+  token="$(handoff_token)"
+
+  cat <<EOF
+
+Destination quick summary
+-------------------------
+Config file : $CONFIG_FILE
+VMID        : $PVE_VMID
+Disk        : $PVE_DISK
+NBD port    : $NBD_PORT
+NBD export  : $NBD_EXPORT
+
+Handoff token
+-------------
+$token
+
+Run on source:
+./kvm2pve-src.sh quick VM_NAME '$token'
+
+Then return here when source checks are ready:
+./kvm2pve-dst.sh preflight
+./kvm2pve-dst.sh export
+EOF
+}
+
 port_in_use(){ ss -lntp | grep -q "127.0.0.1:${NBD_PORT}"; }
 
 preflight(){
@@ -238,6 +274,7 @@ case "$cmd" in
   init) init_config ;;
   show) show_config ;;
   handoff) handoff_token ;;
+  quick) quick_start "${1:-}" ;;
   preflight) preflight ;;
   export) export_disk ;;
   close) close_export ;;

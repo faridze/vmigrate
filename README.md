@@ -73,7 +73,28 @@ You can also run without an argument and let it ask the VM name:
 ./kvm2pve-src.sh discover
 ```
 
-## Quick handoff workflow
+## Guided quick workflow
+
+The fastest guided path is:
+
+Destination:
+
+```bash
+./kvm2pve-dst.sh quick 2679
+```
+
+Source:
+
+```bash
+./kvm2pve-src.sh quick kvm3023 'KVM2PVE_HANDOFF_V1:...'
+./kvm2pve-src.sh next
+```
+
+`quick` keeps dangerous actions explicit. It prepares and verifies the config,
+prints the next commands, and leaves `export`, `full`, `final`, `stop-source`,
+`close`, and `boot` as deliberate operator commands.
+
+## Manual handoff workflow
 
 Use `handoff` after destination discovery to copy only the destination values
 that the source must match: `PVE_VMID`, `PVE_DISK`, `NBD_PORT`, and
@@ -160,6 +181,8 @@ Destination:
 ./kvm2pve-src.sh init
 ./kvm2pve-src.sh show
 ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
+./kvm2pve-src.sh quick [VM_NAME] [HANDOFF_TOKEN]
+./kvm2pve-src.sh next
 ./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh tunnel
 ./kvm2pve-src.sh tunnel-status
@@ -185,6 +208,7 @@ Destination:
 ./kvm2pve-dst.sh init
 ./kvm2pve-dst.sh show
 ./kvm2pve-dst.sh handoff
+./kvm2pve-dst.sh quick [VMID]
 ./kvm2pve-dst.sh preflight
 ./kvm2pve-dst.sh export
 ./kvm2pve-dst.sh close
