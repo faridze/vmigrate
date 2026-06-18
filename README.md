@@ -157,14 +157,18 @@ Source:
 
 ./kvm2pve-src.sh full
 ./kvm2pve-src.sh watch
+./kvm2pve-src.sh wait-full
+./kvm2pve-src.sh report
 ```
 
 Cutover:
 
 ```bash
+./kvm2pve-src.sh cutover-check
 ./kvm2pve-src.sh check-paused
 ./kvm2pve-src.sh final
 ./kvm2pve-src.sh stop-source
+./kvm2pve-src.sh report
 ```
 
 Destination:
@@ -193,11 +197,16 @@ Destination:
 ./kvm2pve-src.sh bitmap
 ./kvm2pve-src.sh check-bitmap
 ./kvm2pve-src.sh full
+./kvm2pve-src.sh wait-full
+./kvm2pve-src.sh mark-full
 ./kvm2pve-src.sh incremental
+./kvm2pve-src.sh cutover-check
 ./kvm2pve-src.sh check-paused
 ./kvm2pve-src.sh final
 ./kvm2pve-src.sh watch
 ./kvm2pve-src.sh status
+./kvm2pve-src.sh report
+./kvm2pve-src.sh verify-sample
 ./kvm2pve-src.sh cleanup
 ./kvm2pve-src.sh stop-source
 ```
@@ -236,20 +245,49 @@ Do not shut down the source VM before final incremental. If QEMU exits, QMP disa
 6. Add destination NBD as QEMU block node
 7. Create dirty bitmap on source disk node
 8. Run full sync while VM is running
-9. Wait until full sync completes
-10. Lock customer panel controls
-11. Suspend source VM
-12. Verify source VM is paused
-13. Run final incremental
-14. Stop source VM
-15. Close qemu-nbd export
-16. Boot destination VM
-17. Validate guest services
+9. Wait until full sync completes and mark it with wait-full or mark-full
+10. Run cutover-check
+11. Lock customer panel controls
+12. Suspend source VM
+13. Verify source VM is paused
+14. Run final incremental
+15. Stop source VM
+16. Close qemu-nbd export
+17. Boot destination VM
+18. Validate guest services
 ```
 
 ## Monitoring without jq
 
 The source script uses only `awk` for progress output, so it works on old servers without installing `jq`.
+
+## Source safety state
+
+The source helper writes a simple marker file next to `kvm2pve.env`, named like
+`.kvm2pve-state-VM_NAME`. It stores plain `KEY=VALUE` markers for full sync,
+final incremental, and source stop completion.
+
+`full` still only submits the QMP blockdev-backup job. It does not mark full as
+complete. After the full job finishes, run one of:
+
+```bash
+./kvm2pve-src.sh wait-full
+./kvm2pve-src.sh mark-full
+```
+
+`incremental` and `final` refuse to run until `FULL_COMPLETED=1` is present in
+that state file. If full sync fails, this project does not implement
+`resume-full`; the safe path is to restart full sync from scratch.
+
+Before cutover, run:
+
+```bash
+./kvm2pve-src.sh cutover-check
+./kvm2pve-src.sh report
+```
+
+`cutover-check` validates the VM, block-job state, target node, bitmap, tunnel,
+NBD export reachability, and the full-completed marker without requiring `jq`.
 
 ## Warning
 

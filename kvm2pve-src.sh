@@ -2,7 +2,7 @@
 # kvm2pve source-side helper
 set -Eeuo pipefail
 
-VERSION="0.2.5"
+VERSION="0.3.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -33,11 +33,16 @@ Usage:
   ./kvm2pve-src.sh bitmap
   ./kvm2pve-src.sh check-bitmap
   ./kvm2pve-src.sh full
+  ./kvm2pve-src.sh wait-full
+  ./kvm2pve-src.sh mark-full
   ./kvm2pve-src.sh incremental
+  ./kvm2pve-src.sh cutover-check
   ./kvm2pve-src.sh check-paused
   ./kvm2pve-src.sh final
   ./kvm2pve-src.sh watch
   ./kvm2pve-src.sh status
+  ./kvm2pve-src.sh report
+  ./kvm2pve-src.sh verify-sample
   ./kvm2pve-src.sh cleanup
   ./kvm2pve-src.sh stop-source
 
@@ -76,6 +81,48 @@ write_key(){
   [[ -f "$CONFIG_FILE" ]] && grep -v -E "^${key}=" "$CONFIG_FILE" > "$tmp" || true
   printf '%s=%s\n' "$key" "$val" >> "$tmp"
   mv "$tmp" "$CONFIG_FILE"
+}
+
+now_ts(){ date '+%Y-%m-%d %H:%M:%S %z'; }
+config_dir(){ case "$CONFIG_FILE" in */*) printf '%s' "${CONFIG_FILE%/*}" ;; *) printf '.' ;; esac; }
+state_file(){
+  local vm
+  vm="${VM_NAME:-$(get_conf VM_NAME)}"
+  [[ -n "$vm" ]] || vm="unknown"
+  printf '%s/.kvm2pve-state-%s' "$(config_dir)" "$(sanitize_name "$vm")"
+}
+state_get(){ local key="$1" file; file="$(state_file)"; [[ -f "$file" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$file"; }
+state_write(){
+  local key="$1" val="$2" file tmp
+  file="$(state_file)"
+  tmp="$(mktemp)"
+  [[ -f "$file" ]] && grep -v -E "^${key}=" "$file" > "$tmp" || true
+  printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$file"
+  chmod 600 "$file" 2>/dev/null || true
+}
+state_sync_identity(){
+  state_write VM_NAME "${VM_NAME:-}"
+  state_write SRC_DISK "${SRC_DISK:-}"
+  state_write PVE_DISK "${PVE_DISK:-}"
+  [[ -n "$(state_get FULL_COMPLETED)" ]] || state_write FULL_COMPLETED 0
+  [[ -n "$(state_get FULL_COMPLETED_AT)" ]] || state_write FULL_COMPLETED_AT ""
+  [[ -n "$(state_get FINAL_COMPLETED)" ]] || state_write FINAL_COMPLETED 0
+  [[ -n "$(state_get FINAL_COMPLETED_AT)" ]] || state_write FINAL_COMPLETED_AT ""
+  [[ -n "$(state_get SOURCE_STOPPED)" ]] || state_write SOURCE_STOPPED 0
+  [[ -n "$(state_get SOURCE_STOPPED_AT)" ]] || state_write SOURCE_STOPPED_AT ""
+}
+state_is_full_completed(){ [[ "$(state_get FULL_COMPLETED)" == "1" ]]; }
+require_full_completed(){
+  state_is_full_completed && return 0
+  die "Full sync is not marked as completed. Refusing incremental/final. Run wait-full or mark-full only after confirming full completed successfully."
+}
+mark_full_completed(){
+  load_config
+  state_sync_identity
+  state_write FULL_COMPLETED 1
+  state_write FULL_COMPLETED_AT "$(now_ts)"
+  ok "Full sync marked completed: $(state_file)"
 }
 
 init_config(){
@@ -359,6 +406,15 @@ parse_info_block(){
 
 block_jobs_json(){ load_config; qmp '{"execute":"query-block-jobs"}'; }
 block_jobs_empty(){ ! block_jobs_json | grep -q '"type"'; }
+block_jobs_query_ok_empty(){
+  local out
+  out="$(block_jobs_json 2>/dev/null)" || return 1
+  if printf '%s\n' "$out" | grep -q '"error"'; then
+    printf '%s\n' "$out"
+    return 1
+  fi
+  ! printf '%s\n' "$out" | grep -q '"type"'
+}
 wait_jobs_empty(){
   load_config
   local out
@@ -496,6 +552,9 @@ EOF
     write_key BITMAP "$BITMAP"
     write_key TARGET_NODE "$TARGET_NODE"
     write_key NBD_EXPORT "$NBD_EXPORT"
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    state_sync_identity
     ok "Config updated: $CONFIG_FILE"
   else
     warn "Config not changed"
@@ -607,6 +666,7 @@ create_bitmap(){
 backup_job(){
   local sync="$1" job="$2" extra=""
   load_config; [[ -n "$QEMU_DEVICE" ]] || die "QEMU_DEVICE is empty. Run discover first."
+  if [[ "$sync" == "incremental" ]]; then require_full_completed; fi
   if ! block_jobs_empty; then die "A block job is already present. Run watch/status first."; fi
   if [[ "$sync" == "incremental" ]]; then extra=',"bitmap":"'"$BITMAP"'"'; fi
   qmp '{
@@ -620,6 +680,108 @@ backup_job(){
     "auto-dismiss":true
   }
 }'
+}
+
+mark_full(){
+  load_config
+  if ! block_jobs_query_ok_empty; then
+    die "A block job is active or QMP returned an error. Refusing to mark full completed."
+  fi
+  mark_full_completed
+}
+
+wait_full(){
+  load_config
+  local out
+  while true; do
+    out="$(block_jobs_json 2>/dev/null)" || die "Could not query block jobs over QMP"
+    if printf '%s\n' "$out" | grep -q '"error"'; then
+      printf '%s\n' "$out"
+      die "Block job query returned an error"
+    fi
+    if ! printf '%s\n' "$out" | grep -q '"type"'; then
+      ok "No active block job"
+      mark_full_completed
+      return 0
+    fi
+    printf '%s\n' "$out" | awk '
+      /"offset"/ {gsub(/[^0-9]/,"",$2); offset=$2}
+      /"len"/ {gsub(/[^0-9]/,"",$2); len=$2}
+      /"status"/ {gsub(/[",]/,"",$2); status=$2}
+      END { if (len > 0) printf "Progress: %d%% | %s / %s | Status: %s\n", int((offset*100)/len), offset, len, status; else print "Block job running" }'
+    sleep 2
+  done
+}
+
+report(){
+  load_config
+  state_sync_identity
+  cat <<EOF
+Migration report
+----------------
+VM name              : $VM_NAME
+Source disk          : ${SRC_DISK:-not set}
+Proxmox VMID         : $PVE_VMID
+Destination disk     : $PVE_DISK
+Bitmap               : $BITMAP
+Target node          : $TARGET_NODE
+State file           : $(state_file)
+FULL_COMPLETED       : $(state_get FULL_COMPLETED)
+FULL_COMPLETED_AT    : $(state_get FULL_COMPLETED_AT)
+FINAL_COMPLETED      : $(state_get FINAL_COMPLETED)
+FINAL_COMPLETED_AT   : $(state_get FINAL_COMPLETED_AT)
+SOURCE_STOPPED       : $(state_get SOURCE_STOPPED)
+SOURCE_STOPPED_AT    : $(state_get SOURCE_STOPPED_AT)
+EOF
+  if command -v virsh >/dev/null 2>&1; then
+    echo "VM state             : $(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
+  else
+    echo "VM state             : virsh not found"
+  fi
+  echo "Active block jobs    :"
+  if out="$(block_jobs_json 2>/dev/null)"; then
+    if printf '%s\n' "$out" | grep -q '"type"'; then
+      printf '%s\n' "$out"
+    elif printf '%s\n' "$out" | grep -q '"error"'; then
+      printf '%s\n' "$out"
+    else
+      echo "none"
+    fi
+  else
+    echo "unavailable"
+  fi
+}
+
+cutover_check(){
+  load_config
+  local failed=0 state out
+  check_ok(){ printf 'OK   %s\n' "$1"; }
+  check_fail(){ printf 'FAIL %s\n' "$1"; failed=1; }
+
+  if command -v virsh >/dev/null 2>&1 && virsh list --all | awk '{print $2}' | grep -qx "$VM_NAME"; then check_ok "VM exists in virsh"; else check_fail "VM exists in virsh"; fi
+
+  state="$(virsh domstate "$VM_NAME" 2>/dev/null | tr '[:upper:]' '[:lower:]' | awk '{print $1}' || true)"
+  case "$state" in running|paused|pmsuspended) check_ok "VM is running or paused ($state)" ;; *) check_fail "VM is running or paused (${state:-unknown})" ;; esac
+
+  if block_jobs_query_ok_empty >/dev/null; then check_ok "No active block job"; else check_fail "No active block job"; fi
+  if target_node_exists; then check_ok "Target node exists"; else check_fail "Target node exists"; fi
+  if bitmap_exists; then check_ok "Bitmap exists"; else check_fail "Bitmap exists"; fi
+  if command -v ss >/dev/null 2>&1 && ss -lntp | grep "127.0.0.1:${NBD_PORT}" >/dev/null; then check_ok "Local tunnel listener 127.0.0.1:${NBD_PORT}"; else check_fail "Local tunnel listener 127.0.0.1:${NBD_PORT}"; fi
+  if command -v qemu-img >/dev/null 2>&1 && qemu-img info "nbd:127.0.0.1:${NBD_PORT}:exportname=${NBD_EXPORT}" >/dev/null 2>&1; then check_ok "NBD export reachable"; else check_fail "NBD export reachable"; fi
+  if state_is_full_completed; then check_ok "FULL_COMPLETED=1"; else check_fail "FULL_COMPLETED=1"; fi
+
+  return "$failed"
+}
+
+verify_sample(){
+  cat <<EOF
+verify-sample is not implemented yet.
+
+A safe implementation should compare read-only samples from SRC_DISK and the
+NBD export without writing to either side. This placeholder is intentional to
+avoid adding risky disk sampling logic without production testing.
+EOF
+  return 1
 }
 
 watch_jobs(){
@@ -638,7 +800,7 @@ watch_jobs(){
           printf "Job: %s\nProgress: %d%%\nOffset: %s\nTotal: %s\nStatus: %s\n", device, pct, offset, len, status
           if (err != "") print err
         } else {
-          print "No active block job. If a job was running, it is probably completed."
+          print "No active block job. If this was full, run: ./kvm2pve-src.sh mark-full"
         }
       }'
     sleep 2
@@ -654,12 +816,16 @@ status(){
 
 final_cutover(){
   load_config
+  require_full_completed
   warn "Before final cutover, lock customer/Virtualizor panel controls."
   confirm "Suspend source VM and run FINAL incremental now?" || die "Aborted"
   virsh suspend "$VM_NAME" || die "virsh suspend failed"
   wait_vm_paused
   backup_job incremental final
   wait_jobs_empty
+  state_sync_identity
+  state_write FINAL_COMPLETED 1
+  state_write FINAL_COMPLETED_AT "$(now_ts)"
   ok "Final incremental completed"
 }
 
@@ -681,6 +847,10 @@ stop_source(){
   fi
   confirm "Destroy/stop source VM $VM_NAME now?" || die "Aborted"
   virsh destroy "$VM_NAME"
+  state_sync_identity
+  state_write SOURCE_STOPPED 1
+  state_write SOURCE_STOPPED_AT "$(now_ts)"
+  ok "Source VM stopped and state updated"
 }
 
 cmd="${1:-}"; shift || true
@@ -700,11 +870,16 @@ case "$cmd" in
   bitmap) create_bitmap ;;
   check-bitmap) check_bitmap ;;
   full) backup_job full full ;;
+  wait-full) wait_full ;;
+  mark-full) mark_full ;;
   incremental) backup_job incremental inc1 ;;
+  cutover-check) cutover_check ;;
   check-paused) check_paused ;;
   final) final_cutover ;;
   watch) watch_jobs ;;
   status) status ;;
+  report) report ;;
+  verify-sample) verify_sample ;;
   cleanup) cleanup ;;
   stop-source) stop_source ;;
   -h|--help|help|"") usage ;;
