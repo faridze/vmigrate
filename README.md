@@ -156,19 +156,20 @@ Source:
 ./kvm2pve-src.sh check-bitmap
 
 ./kvm2pve-src.sh full
-./kvm2pve-src.sh watch
 ./kvm2pve-src.sh wait-full
 ./kvm2pve-src.sh report
+
+# Optional monitor in another terminal:
+./kvm2pve-src.sh watch
 ```
 
 Cutover:
 
 ```bash
 ./kvm2pve-src.sh cutover-check
-./kvm2pve-src.sh check-paused
 ./kvm2pve-src.sh final
-./kvm2pve-src.sh stop-source
 ./kvm2pve-src.sh report
+./kvm2pve-src.sh stop-source
 ```
 
 Destination:
@@ -267,11 +268,21 @@ The source helper writes a simple marker file next to `kvm2pve.env`, named like
 `.kvm2pve-state-VM_NAME`. It stores plain `KEY=VALUE` markers for full sync,
 final incremental, and source stop completion.
 
-`full` still only submits the QMP blockdev-backup job. It does not mark full as
-complete. After the full job finishes, run one of:
+`full` still only submits the QMP blockdev-backup job. It records
+`FULL_STARTED=1`, but it does not mark full as complete. After starting full,
+`wait-full` is the recommended way to wait for completion and set
+`FULL_COMPLETED=1`:
 
 ```bash
+./kvm2pve-src.sh full
 ./kvm2pve-src.sh wait-full
+./kvm2pve-src.sh report
+```
+
+`mark-full` is only for manual recovery when the operator is sure full completed
+successfully and no active block job remains:
+
+```bash
 ./kvm2pve-src.sh mark-full
 ```
 

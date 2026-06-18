@@ -105,6 +105,9 @@ state_sync_identity(){
   state_write VM_NAME "${VM_NAME:-}"
   state_write SRC_DISK "${SRC_DISK:-}"
   state_write PVE_DISK "${PVE_DISK:-}"
+  [[ -n "$(state_get FULL_STARTED)" ]] || state_write FULL_STARTED 0
+  [[ -n "$(state_get FULL_STARTED_AT)" ]] || state_write FULL_STARTED_AT ""
+  [[ -n "$(state_get FULL_JOB_ID)" ]] || state_write FULL_JOB_ID ""
   [[ -n "$(state_get FULL_COMPLETED)" ]] || state_write FULL_COMPLETED 0
   [[ -n "$(state_get FULL_COMPLETED_AT)" ]] || state_write FULL_COMPLETED_AT ""
   [[ -n "$(state_get FINAL_COMPLETED)" ]] || state_write FINAL_COMPLETED 0
@@ -122,7 +125,6 @@ mark_full_completed(){
   state_sync_identity
   state_write FULL_COMPLETED 1
   state_write FULL_COMPLETED_AT "$(now_ts)"
-  ok "Full sync marked completed: $(state_file)"
 }
 
 init_config(){
@@ -351,11 +353,16 @@ EOF
 ./kvm2pve-src.sh bitmap
 ./kvm2pve-src.sh check-bitmap
 ./kvm2pve-src.sh full
+./kvm2pve-src.sh wait-full
+./kvm2pve-src.sh report
+
+Optional monitor in another terminal:
 ./kvm2pve-src.sh watch
 
-Final cutover stays explicit:
-./kvm2pve-src.sh check-paused
+Before cutover:
+./kvm2pve-src.sh cutover-check
 ./kvm2pve-src.sh final
+./kvm2pve-src.sh report
 ./kvm2pve-src.sh stop-source
 EOF
   fi
@@ -682,16 +689,32 @@ backup_job(){
 }'
 }
 
+full_sync(){
+  load_config
+  state_sync_identity
+  backup_job full full
+  state_write FULL_STARTED 1
+  state_write FULL_STARTED_AT "$(now_ts)"
+  state_write FULL_JOB_ID full
+  state_write FULL_COMPLETED 0
+  state_write FULL_COMPLETED_AT ""
+  ok "Full sync job submitted. Run: ./kvm2pve-src.sh wait-full"
+}
+
 mark_full(){
   load_config
   if ! block_jobs_query_ok_empty; then
     die "A block job is active or QMP returned an error. Refusing to mark full completed."
   fi
   mark_full_completed
+  ok "Full sync manually marked completed: $(state_file)"
 }
 
 wait_full(){
   load_config
+  if [[ "$(state_get FULL_STARTED)" != "1" || "$(state_get FULL_JOB_ID)" != "full" ]]; then
+    die "Full job was not started by this state file. Refusing to mark completed automatically. If you are sure full completed successfully, run mark-full."
+  fi
   local out
   while true; do
     out="$(block_jobs_json 2>/dev/null)" || die "Could not query block jobs over QMP"
@@ -702,6 +725,7 @@ wait_full(){
     if ! printf '%s\n' "$out" | grep -q '"type"'; then
       ok "No active block job"
       mark_full_completed
+      ok "Full sync marked completed: $(state_file)"
       return 0
     fi
     printf '%s\n' "$out" | awk '
@@ -726,6 +750,9 @@ Destination disk     : $PVE_DISK
 Bitmap               : $BITMAP
 Target node          : $TARGET_NODE
 State file           : $(state_file)
+FULL_STARTED         : $(state_get FULL_STARTED)
+FULL_STARTED_AT      : $(state_get FULL_STARTED_AT)
+FULL_JOB_ID          : $(state_get FULL_JOB_ID)
 FULL_COMPLETED       : $(state_get FULL_COMPLETED)
 FULL_COMPLETED_AT    : $(state_get FULL_COMPLETED_AT)
 FINAL_COMPLETED      : $(state_get FINAL_COMPLETED)
@@ -869,7 +896,7 @@ case "$cmd" in
   check-target) check_target ;;
   bitmap) create_bitmap ;;
   check-bitmap) check_bitmap ;;
-  full) backup_job full full ;;
+  full) full_sync ;;
   wait-full) wait_full ;;
   mark-full) mark_full ;;
   incremental) backup_job incremental inc1 ;;
