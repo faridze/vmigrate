@@ -33,7 +33,7 @@ kvm2pve-dst.sh                 Run on destination Proxmox host
 examples/kvm2pve.env.example   Example shared config
 ```
 
-## Recommended start
+## Manual source discovery
 
 On the source host, run discovery with the VM name:
 
@@ -73,9 +73,10 @@ You can also run without an argument and let it ask the VM name:
 ./kvm2pve-src.sh discover
 ```
 
-## Guided quick workflow
+## Recommended quick workflow
 
-The fastest guided path is:
+The fastest guided path starts on the destination and prints each next command
+with the host where it must run:
 
 Destination:
 
@@ -83,11 +84,36 @@ Destination:
 ./kvm2pve-dst.sh quick 2679
 ```
 
-Source:
+Then follow the printed steps:
 
 ```bash
+# On source, paste the handoff token printed by destination quick:
 ./kvm2pve-src.sh quick 'KVM2PVE_HANDOFF_V1:...'
-./kvm2pve-src.sh next
+
+# On destination, start the export:
+./kvm2pve-dst.sh preflight
+./kvm2pve-dst.sh export
+
+# On source, continue with the quick/next checklist:
+./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-check
+./kvm2pve-src.sh attach-target
+./kvm2pve-src.sh check-target
+./kvm2pve-src.sh bitmap
+./kvm2pve-src.sh check-bitmap
+./kvm2pve-src.sh full
+./kvm2pve-src.sh wait-full
+./kvm2pve-src.sh report
+
+# Cutover on source:
+./kvm2pve-src.sh cutover-check
+./kvm2pve-src.sh final
+./kvm2pve-src.sh report
+./kvm2pve-src.sh stop-source
+
+# Finish on destination:
+./kvm2pve-dst.sh close
+./kvm2pve-dst.sh boot
 ```
 
 `quick` keeps dangerous actions explicit. It prepares and verifies the config,

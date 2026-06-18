@@ -313,8 +313,8 @@ Current state
 -------------
 Config file : missing
 
-Next:
-./kvm2pve-src.sh discover VM_NAME
+Next (recommended):
+./kvm2pve-src.sh quick HANDOFF_TOKEN
 EOF
     return 0
   fi
@@ -345,6 +345,11 @@ EOF
     echo "Set PVE_HOST in $CONFIG_FILE, then run: ./kvm2pve-src.sh preflight"
   else
     cat <<EOF
+1) On destination, start the NBD export before source tunnel/check:
+./kvm2pve-dst.sh preflight
+./kvm2pve-dst.sh export
+
+2) On source, connect and run the full sync:
 ./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh tunnel
 ./kvm2pve-src.sh tunnel-check
@@ -359,11 +364,15 @@ EOF
 Optional monitor in another terminal:
 ./kvm2pve-src.sh watch
 
-Before cutover:
+3) Before cutover, run on source:
 ./kvm2pve-src.sh cutover-check
 ./kvm2pve-src.sh final
 ./kvm2pve-src.sh report
 ./kvm2pve-src.sh stop-source
+
+4) After source final/stop-source succeeds, run on destination:
+./kvm2pve-dst.sh close
+./kvm2pve-dst.sh boot
 EOF
   fi
 }

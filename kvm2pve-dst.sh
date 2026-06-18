@@ -207,12 +207,35 @@ Handoff token
 -------------
 $token
 
-Run on source:
+Recommended quick path
+----------------------
+1) On source, use the handoff token and let quick discover the source VM:
 ./kvm2pve-src.sh quick '$token'
 
-Then return here when source checks are ready:
+2) On destination, start the NBD export:
 ./kvm2pve-dst.sh preflight
 ./kvm2pve-dst.sh export
+
+3) On source, continue with the commands printed by quick/next:
+./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-check
+./kvm2pve-src.sh attach-target
+./kvm2pve-src.sh check-target
+./kvm2pve-src.sh bitmap
+./kvm2pve-src.sh check-bitmap
+./kvm2pve-src.sh full
+./kvm2pve-src.sh wait-full
+./kvm2pve-src.sh report
+
+4) For cutover, run on source:
+./kvm2pve-src.sh cutover-check
+./kvm2pve-src.sh final
+./kvm2pve-src.sh report
+./kvm2pve-src.sh stop-source
+
+5) After source final/stop-source succeeds, run on destination:
+./kvm2pve-dst.sh close
+./kvm2pve-dst.sh boot
 EOF
 }
 
