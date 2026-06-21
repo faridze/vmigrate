@@ -414,14 +414,12 @@ confirm_stop_source(){
 
 run_final_sync(){
   confirm_final || return 1
-  run_step_with_input final "Final sync" "yes
-" "$SRC_SCRIPT" final
+  run_step_with_input final "Final sync" "yes\n" "$SRC_SCRIPT" final
 }
 
 run_stop_source(){
   confirm_stop_source || return 1
-  run_step_with_input stop-source "Stop source" "yes
-" "$SRC_SCRIPT" stop-source
+  run_step_with_input stop-source "Stop source" "yes\n" "$SRC_SCRIPT" stop-source
 }
 
 ask_remote_prepare_form(){
@@ -431,12 +429,12 @@ ask_remote_prepare_form(){
   default_vmid="$(current_conf_value PVE_VMID '')"
   default_user="$(current_conf_value PVE_SSH_USER root)"
   default_port="$(current_conf_value PVE_SSH_PORT 22)"
-  values="$(whiptail --title "New Migration" --form "Enter source and destination values. Run this UI on the SOURCE host." 18 86 8 \
-    "Source VM:" 1 1 "$default_vm" 1 26 42 128 \
-    "Destination Host:" 2 1 "$default_host" 2 26 42 128 \
-    "Destination VMID:" 3 1 "$default_vmid" 3 26 42 32 \
-    "SSH User:" 4 1 "$default_user" 4 26 42 64 \
-    "SSH Port:" 5 1 "$default_port" 5 26 42 16 \
+  values="$(whiptail --title "New Migration" --form "Enter values on this SOURCE host." 16 78 6 \
+    "Source VM:" 1 1 "$default_vm" 1 22 36 128 \
+    "Destination Host:" 2 1 "$default_host" 2 22 36 128 \
+    "Destination VMID:" 3 1 "$default_vmid" 3 22 36 32 \
+    "SSH User:" 4 1 "$default_user" 4 22 36 64 \
+    "SSH Port:" 5 1 "$default_port" 5 22 36 16 \
     3>&1 1>&2 2>&3)" || return 1
   file="$(mktemp)"
   printf '%s\n' "$values" > "$file"
@@ -445,7 +443,7 @@ ask_remote_prepare_form(){
 
 confirm_remote_prepare_summary(){
   local vm="$1" host="$2" vmid="$3" user="$4" port="$5"
-  whiptail --title "Confirm Remote Migration" --yesno "Source VM: $vm\nDestination Host: $host\nDestination VMID: $vmid\nSSH User: $user\nSSH Port: $port\n\nRun remote-prepare from this SOURCE host now?" 15 82
+  whiptail --title "Confirm Remote Migration" --yesno "Source VM: $vm\nDestination Host: $host\nDestination VMID: $vmid\nSSH User: $user\nSSH Port: $port\n\nRun remote-prepare from this SOURCE host now?" 15 78
 }
 
 main_menu(){
@@ -472,7 +470,13 @@ main_menu(){
 
 start_new_migration(){
   local file vm host vmid user port
-  file="$(ask_remote_prepare_form)" || return 0
+  if ! file="$(ask_remote_prepare_form)"; then
+    whiptail --title "New Migration" --msgbox "The New Migration form was cancelled or could not fit in this terminal.
+
+Try a terminal at least 80 columns wide, or use the CLI remote workflow:
+./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]" 13 78 || true
+    return 0
+  fi
   vm="$(sed -n '1p' "$file")"
   host="$(sed -n '2p' "$file")"
   vmid="$(sed -n '3p' "$file")"
@@ -496,7 +500,7 @@ remote_workflow_menu(){
   local choice header
   while true; do
     header="$(workflow_header)"
-    choice="$(whiptail --title "Source Remote Workflow" --default-item "$SUGGESTED_ACTION" --menu "$header" 26 90 18 \
+    choice="$(whiptail --title "Source Remote Workflow" --default-item "$SUGGESTED_ACTION" --menu "$header" 24 78 16 \
       "prep" "=== Safe Preparation ===" \
       "preflight" "Run preflight" \
       "remote-export" "Run remote export" \
