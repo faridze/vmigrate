@@ -20,7 +20,7 @@ usage(){ cat <<EOF
 kvm2pve-src.sh v${VERSION}
 
 Usage:
-  ./kvm2pve-src.sh discover [VM_NAME]
+  ./kvm2pve-src.sh discover [VM_NAME] [--yes]
   ./kvm2pve-src.sh init
   ./kvm2pve-src.sh show
   ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
@@ -487,8 +487,11 @@ remote_prepare(){
   [[ "$token" == "$prefix"* ]] || die "Remote handoff token is invalid"
 
   apply_handoff "$token"
-  echo "INFO Source discovery may ask for confirmation before writing SRC_DISK/QEMU_DEVICE/QEMU_NODE."
-  discover "$VM_NAME"
+  info "Running source discovery and writing SRC_DISK/QEMU_DEVICE/QEMU_NODE when unambiguous"
+  discover "$VM_NAME" --yes
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  [[ -n "${SRC_DISK:-}" && ( -b "$SRC_DISK" || -f "$SRC_DISK" ) && -n "${QEMU_DEVICE:-}" && -n "${QEMU_NODE:-}" ]] || die "Source discovery did not write valid SRC_DISK/QEMU_DEVICE/QEMU_NODE. Run: ./kvm2pve-src.sh discover $VM_NAME"
   show_config
   remote_prepare_next_steps
 }
@@ -622,7 +625,24 @@ check_paused(){
 }
 
 discover(){
-  local vm_arg="${1:-}" existing_disk out detected count chosen device node disk size
+  local vm_arg="" assume_yes=0 existing_disk out detected count chosen device node disk size arg
+
+  while (( $# > 0 )); do
+    arg="$1"
+    case "$arg" in
+      --yes|-y)
+        assume_yes=1
+        ;;
+      "")
+        ;;
+      *)
+        [[ -z "$vm_arg" ]] || die "Usage: ./kvm2pve-src.sh discover [VM_NAME] [--yes]"
+        vm_arg="$arg"
+        ;;
+    esac
+    shift
+  done
+
   need virsh; need awk
   ensure_base_config "$vm_arg"
   # shellcheck disable=SC1090
@@ -643,6 +663,10 @@ discover(){
   device="$(printf '%s' "$chosen" | awk -F '\t' '{print $1}')"
   node="$(printf '%s' "$chosen" | awk -F '\t' '{print $2}')"
   disk="$(printf '%s' "$chosen" | awk -F '\t' '{print $3}')"
+  [[ -n "$disk" && ( -b "$disk" || -f "$disk" ) ]] || die "Detected SRC_DISK is missing or invalid: ${disk:-empty}"
+  if (( assume_yes )) && [[ "$count" != "1" && -z "$existing_disk" ]]; then
+    die "Multiple source block devices found. Refusing --yes without an existing SRC_DISK. Run: ./kvm2pve-src.sh discover $VM_NAME"
+  fi
   size="$(blockdev --getsize64 "$disk" 2>/dev/null || stat -c %s "$disk" 2>/dev/null || echo unknown)"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
@@ -665,7 +689,7 @@ Proxmox VMID        : $PVE_VMID
 Proxmox disk        : $PVE_DISK
 NBD port/export     : ${NBD_PORT}/${NBD_EXPORT}
 EOF
-  if confirm "Write these detected values to config and continue with this VM?"; then
+  if (( assume_yes )) || confirm "Write these detected values to config and continue with this VM?"; then
     write_key SRC_DISK "$disk"
     write_key QEMU_DEVICE "$device"
     write_key QEMU_NODE "$node"
@@ -996,7 +1020,7 @@ stop_source(){
 cmd="${1:-}"; shift || true
 case "$cmd" in
   init) init_config ;;
-  discover) discover "${1:-}" ;;
+  discover) discover "$@" ;;
   show) show_config ;;
   apply-handoff) apply_handoff "${1:-}" ;;
   remote-prepare|migrate-prepare) remote_prepare "${1:-}" "${2:-}" "${3:-}" "${4:-22}" "${5:-root}" ;;

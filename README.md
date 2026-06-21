@@ -99,7 +99,12 @@ examples/kvm2pve.env.example   Example shared config
 This is the preferred CLI path when the source host can SSH directly to the
 destination Proxmox host.
 
-Run from the SOURCE host only:
+Run from the SOURCE host only. `remote-prepare` writes the remote connection
+settings, copies the destination helper over SSH, runs destination discovery,
+applies the handoff locally, then runs source discovery. Source discovery now
+writes `SRC_DISK`, `QEMU_DEVICE`, and `QEMU_NODE` automatically when the source
+VM has a single unambiguous disk. If multiple source block devices are found,
+run `./kvm2pve-src.sh discover VM_NAME` manually and confirm the correct disk.
 
 ```bash
 ./kvm2pve-src.sh remote-prepare kvm3023 192.0.2.10 2679 22 root
@@ -187,11 +192,11 @@ For normal migrations use the Recommended Remote Workflow.
 ## Source Commands
 
 ```text
-discover
+discover [VM_NAME] [--yes]
 init
 show
 apply-handoff
-remote-prepare
+remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
 remote-export
 remote-dst-status
 remote-dst-close
