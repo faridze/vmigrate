@@ -61,6 +61,10 @@ ask_yesno(){
   whiptail --title "$title" --yesno "$prompt" 10 78
 }
 
+whiptail_supports_form(){
+  whiptail --help 2>&1 | grep -q -- '--form'
+}
+
 ask_exact(){
   local title="$1" prompt="$2" expected="$3" value
   value="$(whiptail --title "$title" --inputbox "$prompt\n\nType exactly: $expected" 14 82 "" 3>&1 1>&2 2>&3)" || return 1
@@ -424,22 +428,37 @@ run_stop_source(){
 
 ask_remote_prepare_form(){
   local values file default_vm default_host default_vmid default_user default_port
+  local vm host vmid user port
+
   default_vm="$(current_conf_value VM_NAME kvm3023)"
   default_host="$(current_conf_value PVE_HOST CHANGE_ME)"
   default_vmid="$(current_conf_value PVE_VMID '')"
   default_user="$(current_conf_value PVE_SSH_USER root)"
   default_port="$(current_conf_value PVE_SSH_PORT 22)"
-  values="$(whiptail --title "New Migration" --form "Enter values on this SOURCE host." 16 78 6 \
-    "Source VM:" 1 1 "$default_vm" 1 22 36 128 \
-    "Destination Host:" 2 1 "$default_host" 2 22 36 128 \
-    "Destination VMID:" 3 1 "$default_vmid" 3 22 36 32 \
-    "SSH User:" 4 1 "$default_user" 4 22 36 64 \
-    "SSH Port:" 5 1 "$default_port" 5 22 36 16 \
-    3>&1 1>&2 2>&3)" || return 1
   file="$(mktemp)"
-  printf '%s\n' "$values" > "$file"
+
+  if whiptail_supports_form; then
+    values="$(whiptail --title "New Migration" --form "Enter values on this SOURCE host." 16 78 6 \
+      "Source VM:" 1 1 "$default_vm" 1 22 36 128 \
+      "Destination Host:" 2 1 "$default_host" 2 22 36 128 \
+      "Destination VMID:" 3 1 "$default_vmid" 3 22 36 32 \
+      "SSH User:" 4 1 "$default_user" 4 22 36 64 \
+      "SSH Port:" 5 1 "$default_port" 5 22 36 16 \
+      3>&1 1>&2 2>&3)" || { rm -f "$file"; return 1; }
+    printf '%s\n' "$values" > "$file"
+  else
+    whiptail --title "New Migration" --msgbox "This whiptail build does not support --form.\n\nThe UI will ask the same five values one by one." 10 78 || true
+    vm="$(ask_input "New Migration" "Source VM:" "$default_vm")" || { rm -f "$file"; return 1; }
+    host="$(ask_input "New Migration" "Destination Host:" "$default_host")" || { rm -f "$file"; return 1; }
+    vmid="$(ask_input "New Migration" "Destination VMID:" "$default_vmid")" || { rm -f "$file"; return 1; }
+    user="$(ask_input "New Migration" "SSH User:" "$default_user")" || { rm -f "$file"; return 1; }
+    port="$(ask_input "New Migration" "SSH Port:" "$default_port")" || { rm -f "$file"; return 1; }
+    printf '%s\n%s\n%s\n%s\n%s\n' "$vm" "$host" "$vmid" "$user" "$port" > "$file"
+  fi
+
   printf '%s' "$file"
 }
+
 
 confirm_remote_prepare_summary(){
   local vm="$1" host="$2" vmid="$3" user="$4" port="$5"
@@ -471,10 +490,10 @@ main_menu(){
 start_new_migration(){
   local file vm host vmid user port
   if ! file="$(ask_remote_prepare_form)"; then
-    whiptail --title "New Migration" --msgbox "The New Migration form was cancelled or could not fit in this terminal.
+    whiptail --title "New Migration" --msgbox "New Migration was cancelled.
 
-Try a terminal at least 80 columns wide, or use the CLI remote workflow:
-./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]" 13 78 || true
+You can also use the CLI remote workflow:
+./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]" 11 78 || true
     return 0
   fi
   vm="$(sed -n '1p' "$file")"
