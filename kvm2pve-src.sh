@@ -21,6 +21,10 @@ Usage:
   ./kvm2pve-src.sh init
   ./kvm2pve-src.sh show
   ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
+  ./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
+  ./kvm2pve-src.sh remote-export
+  ./kvm2pve-src.sh remote-dst-status
+  ./kvm2pve-src.sh remote-dst-close
   ./kvm2pve-src.sh quick [HANDOFF_TOKEN]
   ./kvm2pve-src.sh quick [VM_NAME] [HANDOFF_TOKEN]
   ./kvm2pve-src.sh next
@@ -405,6 +409,103 @@ quick_start(){
 
   echo
   next_steps
+}
+
+remote_dir(){ printf '/root/kvm2pve'; }
+remote_ssh(){
+  ssh -p "$PVE_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$PVE_SSH_USER@$PVE_HOST" "$@"
+}
+remote_ssh_batch(){
+  remote_ssh "$@"
+}
+
+remote_prepare_next_steps(){
+  cat <<EOF
+
+Destination is prepared remotely.
+Now run:
+
+./kvm2pve-src.sh preflight
+./kvm2pve-src.sh remote-export
+./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-check
+./kvm2pve-src.sh attach-target
+./kvm2pve-src.sh check-target
+./kvm2pve-src.sh bitmap
+./kvm2pve-src.sh check-bitmap
+./kvm2pve-src.sh full
+./kvm2pve-src.sh watch
+EOF
+}
+
+remote_prepare(){
+  local vm="${1:-}" pve_host="${2:-}" pve_vmid="${3:-}" ssh_port="${4:-22}" ssh_user="${5:-root}"
+  local dst_script rdir token prefix="KVM2PVE_HANDOFF_V1:"
+
+  [[ -n "$vm" && -n "$pve_host" && -n "$pve_vmid" ]] || die "Usage: ./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]"
+  case "$pve_vmid" in *[!0-9]*|'') die "Destination Proxmox VMID must be numeric" ;; esac
+  case "$ssh_port" in *[!0-9]*|'') die "SSH port must be numeric" ;; esac
+  [[ -f "$SCRIPT_DIR/kvm2pve-src.sh" ]] || die "Source helper missing: $SCRIPT_DIR/kvm2pve-src.sh"
+  dst_script="$SCRIPT_DIR/kvm2pve-dst.sh"
+  [[ -f "$dst_script" ]] || die "Destination helper missing: $dst_script"
+
+  write_key VM_NAME "$vm"
+  write_key PVE_HOST "$pve_host"
+  write_key PVE_SSH_USER "$ssh_user"
+  write_key PVE_SSH_PORT "$ssh_port"
+  write_key PVE_VMID "$pve_vmid"
+  [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP "$(default_bitmap "$vm")"
+  [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE "$(default_target_node "$vm")"
+  [[ -n "$(get_conf NBD_PORT)" ]] || write_key NBD_PORT 10809
+  write_key NBD_EXPORT "vm-${pve_vmid}"
+  [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
+  [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
+
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  rdir="$(remote_dir)"
+
+  need ssh
+  need scp
+  info "Testing SSH connectivity to ${PVE_SSH_USER}@${PVE_HOST}:${PVE_SSH_PORT}"
+  remote_ssh_batch true >/dev/null || die "Cannot connect to destination over SSH: ${PVE_SSH_USER}@${PVE_HOST}:${PVE_SSH_PORT}"
+
+  info "Creating remote workspace: $rdir"
+  remote_ssh "mkdir -p '$rdir'" || die "Could not create remote workspace: $rdir"
+
+  info "Copying destination helper"
+  scp -P "$PVE_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$dst_script" "${PVE_SSH_USER}@${PVE_HOST}:${rdir}/kvm2pve-dst.sh" || die "Could not copy destination helper"
+  remote_ssh "chmod +x '$rdir/kvm2pve-dst.sh'" || die "Could not make destination helper executable"
+
+  info "Discovering destination VMID $PVE_VMID"
+  remote_ssh "cd '$rdir' && ./kvm2pve-dst.sh discover '$PVE_VMID' --yes" || die "Remote destination discover failed"
+
+  info "Reading destination handoff token"
+  token="$(remote_ssh "cd '$rdir' && ./kvm2pve-dst.sh handoff")" || die "Remote destination handoff failed"
+  [[ "$token" == "$prefix"* ]] || die "Remote handoff token is invalid"
+
+  apply_handoff "$token"
+  discover "$VM_NAME"
+  show_config
+  remote_prepare_next_steps
+}
+
+remote_export(){
+  load_config
+  need ssh
+  remote_ssh "cd '$(remote_dir)' && ./kvm2pve-dst.sh preflight && ./kvm2pve-dst.sh export && ./kvm2pve-dst.sh status"
+}
+
+remote_dst_status(){
+  load_config
+  need ssh
+  remote_ssh "cd '$(remote_dir)' && ./kvm2pve-dst.sh status"
+}
+
+remote_dst_close(){
+  load_config
+  need ssh
+  remote_ssh "cd '$(remote_dir)' && ./kvm2pve-dst.sh close"
 }
 
 qmp(){ local json="$1"; virsh qemu-monitor-command "$VM_NAME" --pretty "$json"; }
@@ -895,6 +996,10 @@ case "$cmd" in
   discover) discover "${1:-}" ;;
   show) show_config ;;
   apply-handoff) apply_handoff "${1:-}" ;;
+  remote-prepare|migrate-prepare) remote_prepare "${1:-}" "${2:-}" "${3:-}" "${4:-22}" "${5:-root}" ;;
+  remote-export) remote_export ;;
+  remote-dst-status) remote_dst_status ;;
+  remote-dst-close) remote_dst_close ;;
   quick) quick_start "${1:-}" "${2:-}" ;;
   next) next_steps ;;
   preflight) preflight ;;

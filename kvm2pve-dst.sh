@@ -18,6 +18,7 @@ kvm2pve-dst.sh v${VERSION}
 
 Usage:
   ./kvm2pve-dst.sh discover [VMID]
+  ./kvm2pve-dst.sh discover VMID --yes
   ./kvm2pve-dst.sh init
   ./kvm2pve-dst.sh show
   ./kvm2pve-dst.sh handoff
@@ -121,9 +122,11 @@ first_disk_from_qm(){
 }
 
 discover_config(){
-  local vmid_arg="${1:-}" vmid vm_name disk nbd_port nbd_export
+  local vmid_arg="${1:-}" yes_arg="${2:-}" vmid vm_name disk nbd_port nbd_export yes_mode=0
   need qm
   vmid="$vmid_arg"
+  [[ "$vmid" == "--yes" ]] && vmid="" && yes_arg="--yes"
+  [[ "$yes_arg" == "--yes" || "${KVM2PVE_YES:-}" == "1" ]] && yes_mode=1
   [[ -n "$vmid" ]] || ask vmid "Destination Proxmox VMID" "2672"
   qm config "$vmid" >/dev/null 2>&1 || warn "qm config failed for VMID $vmid; continuing with manual/default values"
   vm_name="$(vm_name_from_qm "$vmid")"
@@ -143,7 +146,7 @@ NBD port    : $nbd_port
 NBD export  : $nbd_export
 EOF
 
-  if confirm "Write these values to destination config?"; then
+  if [[ "$yes_mode" == "1" ]] || confirm "Write these values to destination config?"; then
     cat > "$CONFIG_FILE" <<EOF
 VM_NAME=$vm_name
 PVE_VMID=$vmid
@@ -293,7 +296,7 @@ boot_vm(){
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
-  discover) discover_config "${1:-}" ;;
+  discover) discover_config "${1:-}" "${2:-}" ;;
   init) init_config ;;
   show) show_config ;;
   handoff) handoff_token ;;
