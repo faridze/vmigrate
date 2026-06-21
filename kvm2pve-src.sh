@@ -429,6 +429,10 @@ Now run:
 ./kvm2pve-src.sh bitmap
 ./kvm2pve-src.sh check-bitmap
 ./kvm2pve-src.sh full
+./kvm2pve-src.sh wait-full
+./kvm2pve-src.sh report
+
+Optional monitor in another terminal:
 ./kvm2pve-src.sh watch
 EOF
 }
