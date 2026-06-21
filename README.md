@@ -74,10 +74,78 @@ You can also run without an argument and let it ask the VM name:
 ./kvm2pve-src.sh discover
 ```
 
-## Recommended quick workflow
+## Recommended remote workflow
 
-The fastest guided path starts on the destination and prints each next command
-with the host where it must run:
+This is now the preferred CLI path when the source host can SSH to the
+destination Proxmox host. Run it from the source host only. The source helper
+copies `kvm2pve-dst.sh` to the destination, runs destination discovery with
+`--yes`, reads the handoff token, applies it locally, then runs source
+discovery.
+
+```bash
+./kvm2pve-src.sh remote-prepare kvm3023 5.172.177.66 2679 22 root
+./kvm2pve-src.sh preflight
+./kvm2pve-src.sh remote-export
+./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-check
+./kvm2pve-src.sh attach-target
+./kvm2pve-src.sh check-target
+./kvm2pve-src.sh bitmap
+./kvm2pve-src.sh check-bitmap
+./kvm2pve-src.sh full
+./kvm2pve-src.sh wait-full
+./kvm2pve-src.sh report
+```
+
+Cutover remains explicit:
+
+```bash
+./kvm2pve-src.sh cutover-check
+./kvm2pve-src.sh final
+./kvm2pve-src.sh report
+./kvm2pve-src.sh stop-source
+```
+
+After final:
+
+```bash
+./kvm2pve-src.sh remote-dst-close
+```
+
+Then boot the destination manually on Proxmox.
+
+`remote-prepare` does not start the NBD export or migration. It only prepares
+config, discovery, and handoff:
+
+- writes source config keys
+- tests SSH
+- creates `/root/kvm2pve` on destination
+- copies `kvm2pve-dst.sh` to destination
+- runs destination `discover VMID --yes`
+- reads destination handoff
+- applies handoff locally
+- runs source discover
+- shows final config and next steps
+
+`remote-export` runs destination preflight/export/status over SSH:
+
+```bash
+cd /root/kvm2pve && ./kvm2pve-dst.sh preflight && ./kvm2pve-dst.sh export && ./kvm2pve-dst.sh status
+```
+
+Destination `qemu-nbd` uses `--fork`, so once export starts it should survive
+the SSH command ending. The source tunnel is still separate and should be
+started with:
+
+```bash
+./kvm2pve-src.sh tunnel
+```
+
+## Alternative manual handoff workflow
+
+Use this path when the source host cannot SSH to the destination Proxmox host.
+It starts on the destination and prints each next command with the host where it
+must run:
 
 Destination:
 
@@ -238,6 +306,10 @@ Destination:
 ./kvm2pve-src.sh init
 ./kvm2pve-src.sh show
 ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
+./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
+./kvm2pve-src.sh remote-export
+./kvm2pve-src.sh remote-dst-status
+./kvm2pve-src.sh remote-dst-close
 ./kvm2pve-src.sh quick [HANDOFF_TOKEN]
 ./kvm2pve-src.sh quick [VM_NAME] [HANDOFF_TOKEN]
 ./kvm2pve-src.sh next
@@ -292,22 +364,24 @@ Do not shut down the source VM before final incremental. If QEMU exits, QMP disa
 ```text
 1. Prepare destination VM disk on Proxmox
 2. Run source discovery and confirm config
-3. Export destination disk with qemu-nbd
-4. Create SSH tunnel from source to destination NBD
-5. Check tunnel status and validate the NBD export
-6. Add destination NBD as QEMU block node
-7. Create dirty bitmap on source disk node
-8. Run full sync while VM is running
-9. Wait until full sync completes and mark it with wait-full or mark-full
-10. Run cutover-check
-11. Lock customer panel controls
-12. Suspend source VM
-13. Verify source VM is paused
-14. Run final incremental
-15. Stop source VM
-16. Close qemu-nbd export
-17. Boot destination VM
-18. Validate guest services
+3. Apply destination handoff or run remote-prepare from source
+4. Run source preflight
+5. Export destination disk with qemu-nbd using remote-export or destination export
+6. Create SSH tunnel from source to destination NBD
+7. Check tunnel status and validate the NBD export
+8. Add destination NBD as QEMU block node
+9. Create dirty bitmap on source disk node
+10. Run full sync while VM is running
+11. Wait until full sync completes and mark it with wait-full or mark-full
+12. Run cutover-check
+13. Lock customer panel controls
+14. Suspend source VM
+15. Verify source VM is paused
+16. Run final incremental
+17. Stop source VM
+18. Close qemu-nbd export using remote-dst-close or destination close
+19. Boot destination VM
+20. Validate guest services
 ```
 
 ## Monitoring without jq
