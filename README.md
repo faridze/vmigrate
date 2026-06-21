@@ -27,7 +27,7 @@ ssh root@PVE_HOST
 Example:
 
 ```bash
-ssh root@5.172.177.66
+ssh root@192.0.2.10
 ```
 
 ### 2. Configure passwordless SSH (recommended)
@@ -102,7 +102,7 @@ destination Proxmox host.
 Run from the SOURCE host only:
 
 ```bash
-./kvm2pve-src.sh remote-prepare kvm3023 5.172.177.66 2679 22 root
+./kvm2pve-src.sh remote-prepare kvm3023 192.0.2.10 2679 22 root
 ./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh remote-export
 ./kvm2pve-src.sh tunnel
