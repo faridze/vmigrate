@@ -610,27 +610,64 @@ block_jobs_summary(){
       device=""; status=""; offset=""; len=""
     }'
 }
+
+progress_line(){
+  local offset="${1:-0}" len="${2:-0}" status="${3:-running}" width=30 pct filled empty bar
+  if [[ "$len" =~ ^[0-9]+$ && "$offset" =~ ^[0-9]+$ && "$len" -gt 0 ]]; then
+    pct=$(( offset * 100 / len ))
+    (( pct > 100 )) && pct=100
+    filled=$(( pct * width / 100 ))
+    empty=$(( width - filled ))
+  else
+    pct=0
+    filled=0
+    empty=$width
+  fi
+  bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
+  printf '[%s] %d%% | %s | %s / %s' "$bar" "$pct" "$status" "${offset:-0}" "${len:-0}"
+}
+
+progress_from_jobs_json(){
+  awk '
+    /"offset"/ {gsub(/[^0-9]/,"",$2); offset=$2}
+    /"len"/ {gsub(/[^0-9]/,"",$2); len=$2}
+    /"status"/ {gsub(/[",]/,"",$2); status=$2}
+    END {printf "%s\t%s\t%s\n", offset, len, status}'
+}
 wait_jobs_empty(){
   load_config
-  local out job status
+  local out job status parsed_status progress offset len compact=0 compact_printed=0
+  if [[ -t 1 && "${DEBUG:-0}" != "1" ]]; then
+    compact=1
+  fi
   while true; do
-    out="$(block_jobs_json)" || die "QMP query timed out or failed while waiting for block jobs"
+    out="$(block_jobs_json)" || {
+      (( compact_printed )) && printf '\n'
+      die "QMP query timed out or failed while waiting for block jobs"
+    }
     if printf '%s\n' "$out" | grep -q '"error"'; then
+      (( compact_printed )) && printf '\n'
       printf '%s\n' "$out"
       die "Block job ended with an error"
     fi
     if ! printf '%s\n' "$out" | grep -q '"type"'; then
+      (( compact_printed )) && printf '\n'
       ok "No active block job"
       return 0
     fi
     status="$(printf '%s\n' "$out" | awk -F'"' '/"status"/ {print $4; exit}')"
     job="$(printf '%s\n' "$out" | awk -F'"' '/"device"/ {print $4; exit}')"
-    printf '%s\n' "$out" | awk '
-      /"offset"/ {gsub(/[^0-9]/,"",$2); offset=$2}
-      /"len"/ {gsub(/[^0-9]/,"",$2); len=$2}
-      /"status"/ {gsub(/[",]/,"",$2); status=$2}
-      END { if (len > 0) printf "Progress: %d%% | %s / %s | Status: %s\n", int((offset*100)/len), offset, len, status; else print "Block job running" }'
+    IFS=$'\t' read -r offset len parsed_status <<< "$(printf '%s\n' "$out" | progress_from_jobs_json)"
+    [[ -n "$parsed_status" ]] && status="$parsed_status"
+    progress="$(progress_line "$offset" "$len" "${status:-running}")"
+    if (( compact )); then
+      printf '\r%s' "$progress"
+      compact_printed=1
+    else
+      printf '%s\n' "$progress"
+    fi
     if [[ "$status" == "concluded" ]]; then
+      (( compact_printed )) && printf '\n'
       if [[ -n "$job" ]]; then
         job_dismiss "$job" || warn "Could not dismiss concluded job: $job"
       fi
@@ -844,7 +881,8 @@ start_tunnel(){
   if [[ "$TUNNEL_MODE" == "direct" ]]; then warn "Direct mode selected; no SSH tunnel started"; return; fi
   if tunnel_listener_exists; then
     warn "Tunnel listener already exists on 127.0.0.1:${NBD_PORT}"
-    warn "Run tunnel-check, or tunnel-restart if it is stale."
+    echo "Run: ./kvm2pve-src.sh tunnel-check"
+    echo "If stale, run: ./kvm2pve-src.sh tunnel-restart"
     return 0
   fi
   if [[ "$TUNNEL_MODE" == "autossh" ]]; then need autossh; fi
