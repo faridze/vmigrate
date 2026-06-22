@@ -2,7 +2,7 @@
 # kvm2pve source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.2"
+VERSION="0.4.3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -1305,27 +1305,28 @@ EOF
 
 watch_jobs(){
   load_config
-  local out job status parsed_status offset len progress interactive=0
-  if [[ -t 1 && "${DEBUG:-0}" != "1" ]]; then
-    interactive=1
-  fi
+  local out job status parsed_status offset len progress
+
   while true; do
-    if (( interactive )); then
-      clear || true
-      cat <<EOF
-kvm2pve watch
-VM: $VM_NAME
-Backup method: $(effective_backup_method)
-EOF
-    fi
+    clear || true
+
+    echo "kvm2pve watch"
+    echo "------------"
+    echo "VM            : $VM_NAME"
+    echo "Backup method : $(effective_backup_method)"
+    echo "State         : $(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
+    echo
 
     if ! out="$(block_jobs_json 2>/dev/null)"; then
       warn "QMP query timed out"
+      echo
+      echo "Retrying every 2 seconds..."
       sleep 2
       continue
     fi
 
     if printf '%s\n' "$out" | grep -q '"error"'; then
+      warn "QMP returned an error"
       printf '%s\n' "$out"
       sleep 2
       continue
@@ -1333,25 +1334,32 @@ EOF
 
     if ! printf '%s\n' "$out" | grep -q '"type"'; then
       echo "No active block job."
+      echo
+      echo "Tip: use wait-full or wait-inc after submitting a job."
       sleep 2
       continue
     fi
 
     job="$(printf '%s\n' "$out" | awk -F'"' '/"device"/ {print $4; exit}')"
     status="$(printf '%s\n' "$out" | awk -F'"' '/"status"/ {print $4; exit}')"
-    IFS=$'	' read -r offset len parsed_status <<< "$(printf '%s\n' "$out" | progress_from_jobs_json)"
+    IFS=$'\t' read -r offset len parsed_status <<< "$(printf '%s\n' "$out" | progress_from_jobs_json)"
     [[ -n "$parsed_status" ]] && status="$parsed_status"
-    progress="$(progress_line "$offset" "$len" "${status:-running}")"
 
-    if (( interactive )); then
-      printf 'Job: %s\n%s\n' "${job:-unknown}" "$progress"
-    else
-      printf 'Job: %s | %s\n' "${job:-unknown}" "$progress"
+    echo "Job           : ${job:-unknown}"
+    progress="$(progress_line "$offset" "$len" "${status:-running}")"
+    echo "$progress"
+
+    if printf '%s\n' "$out" | grep -q '"error"'; then
+      echo
+      printf '%s\n' "$out" | grep '"error"' || true
     fi
 
     if [[ "$status" == "concluded" ]]; then
+      echo
       echo "Job concluded."
       echo "Run: ./kvm2pve-src.sh jobs-dismiss-all"
+      echo
+      echo "Note: watch is read-only and will not dismiss jobs."
     fi
 
     sleep 2
