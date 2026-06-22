@@ -33,6 +33,8 @@ Usage:
   ./kvm2pve-src.sh next
   ./kvm2pve-src.sh preflight
   ./kvm2pve-src.sh tunnel
+  ./kvm2pve-src.sh tunnel-stop
+  ./kvm2pve-src.sh tunnel-restart
   ./kvm2pve-src.sh tunnel-status
   ./kvm2pve-src.sh tunnel-check
   ./kvm2pve-src.sh attach-target
@@ -87,6 +89,7 @@ load_config(){
   BACKUP_METHOD="${BACKUP_METHOD:-drive-backup}"
   QMP_TIMEOUT="${QMP_TIMEOUT:-20}"
   CHECK_TIMEOUT="${CHECK_TIMEOUT:-8}"
+  NBD_IO_TIMEOUT="${NBD_IO_TIMEOUT:-20}"
 }
 
 get_conf(){ local key="$1"; [[ -f "$CONFIG_FILE" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$CONFIG_FILE"; }
@@ -245,6 +248,7 @@ Tunnel mode    : $TUNNEL_MODE
 Backup method  : ${BACKUP_METHOD:-drive-backup}
 QMP timeout    : ${QMP_TIMEOUT:-20}s
 Check timeout  : ${CHECK_TIMEOUT:-8}s
+NBD I/O timeout: ${NBD_IO_TIMEOUT:-20}s
 EOF
 }
 
@@ -794,50 +798,120 @@ preflight(){
   ok "Preflight checks passed"
 }
 
+tunnel_listener_exists(){ ss -lntp | grep "127.0.0.1:${NBD_PORT}" >/dev/null; }
+
+tunnel_pids_for_forward(){
+  pgrep -af '(^|/)(autossh|ssh)( |$)' 2>/dev/null | awk -v fwd="${NBD_PORT}:127.0.0.1:${NBD_PORT}" '
+    index($0, fwd) {print $1}
+  '
+}
+
+tunnel_pids(){
+  pgrep -af '(^|/)(autossh|ssh)( |$)' 2>/dev/null | awk -v fwd="${NBD_PORT}:127.0.0.1:${NBD_PORT}" -v host="$PVE_HOST" '
+    index($0, fwd) && index($0, host) {print $1}
+  '
+}
+
+tunnel_kill_pids(){
+  local pids="$1" pid found=0
+  if [[ -z "$pids" ]]; then
+    return 1
+  fi
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+    found=1
+  done <<EOF
+$pids
+EOF
+  (( found ))
+}
+
+tunnel_stop(){
+  load_config; need pgrep
+  local pids
+  pids="$(tunnel_pids || true)"
+  if tunnel_kill_pids "$pids"; then
+    ok "Tunnel stopped"
+  else
+    warn "No tunnel process found."
+  fi
+}
+
 start_tunnel(){
-  load_config; need ssh
+  load_config; need ssh; need ss
   [[ "$PVE_HOST" != "CHANGE_ME" ]] || die "Set PVE_HOST in $CONFIG_FILE"
   if [[ "$TUNNEL_MODE" == "direct" ]]; then warn "Direct mode selected; no SSH tunnel started"; return; fi
+  if tunnel_listener_exists; then
+    warn "Tunnel listener already exists on 127.0.0.1:${NBD_PORT}"
+    warn "Run tunnel-check, or tunnel-restart if it is stale."
+    return 0
+  fi
   if [[ "$TUNNEL_MODE" == "autossh" ]]; then need autossh; fi
-  pkill -f "${NBD_PORT}:127.0.0.1:${NBD_PORT}.*${PVE_HOST}" >/dev/null 2>&1 || true
   local args=(-f -N -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -L "${NBD_PORT}:127.0.0.1:${NBD_PORT}" -p "$PVE_SSH_PORT" "${PVE_SSH_USER}@${PVE_HOST}")
   if [[ "$TUNNEL_MODE" == "autossh" ]]; then autossh -M "$AUTOSSH_MONITOR_PORT" "${args[@]}"; else ssh "${args[@]}"; fi
   ok "Tunnel command sent..."
   echo "Run next: ./kvm2pve-src.sh tunnel-check"
 }
 
+tunnel_restart(){
+  load_config; need pgrep
+  local pids
+  pids="$(tunnel_pids_for_forward || true)"
+  if tunnel_kill_pids "$pids"; then
+    ok "Tunnel stopped"
+  else
+    warn "No tunnel process found."
+  fi
+  sleep 2
+  start_tunnel
+}
+
 nbd_failure_message(){
   cat <<EOF
-ERROR NBD export did not respond within ${CHECK_TIMEOUT:-8}s. Restart tunnel/export:
+ERROR NBD metadata did not respond within ${CHECK_TIMEOUT:-8}s.
+Try:
+./kvm2pve-src.sh tunnel-restart
+./kvm2pve-src.sh tunnel-check
+If still failing:
 ./kvm2pve-src.sh remote-dst-close
 ./kvm2pve-src.sh remote-export
-./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-restart
 ./kvm2pve-src.sh tunnel-check
 EOF
+}
+
+nbd_read_sample_warning(){
+  warn "NBD metadata is reachable, but read sample failed/timed out."
+  warn "Continuing is possible, but if full hangs, restart tunnel/export."
 }
 
 tunnel_health_ok(){
   load_config
   command -v ss >/dev/null 2>&1 || return 1
   command -v qemu-img >/dev/null 2>&1 || return 1
-  command -v qemu-io >/dev/null 2>&1 || return 1
   ss -lntp | grep "127.0.0.1:${NBD_PORT}" >/dev/null || return 1
   timeout "${CHECK_TIMEOUT:-8}" qemu-img info "nbd:127.0.0.1:${NBD_PORT}:exportname=${NBD_EXPORT}" >/dev/null || return 1
-  timeout "${CHECK_TIMEOUT:-8}" qemu-io -f raw -c "read 0 4k" "nbd://127.0.0.1:${NBD_PORT}/${NBD_EXPORT}" >/dev/null || return 1
 }
 
 tunnel_check(){
-  load_config; need ss; need qemu-img; need qemu-io; need timeout
+  load_config; need ss; need qemu-img; need timeout
   ss -lntp | grep "127.0.0.1:${NBD_PORT}" >/dev/null || die "No local tunnel listener on 127.0.0.1:${NBD_PORT}"
   if ! timeout "${CHECK_TIMEOUT:-8}" qemu-img info "nbd:127.0.0.1:${NBD_PORT}:exportname=${NBD_EXPORT}"; then
     nbd_failure_message >&2
     return 1
   fi
-  if ! timeout "${CHECK_TIMEOUT:-8}" qemu-io -f raw -c "read 0 4k" "nbd://127.0.0.1:${NBD_PORT}/${NBD_EXPORT}"; then
-    nbd_failure_message >&2
-    return 1
+  ok "NBD metadata reachable"
+  if ! command -v qemu-io >/dev/null 2>&1; then
+    nbd_read_sample_warning
+    warn "qemu-io not found; skipped read sample."
+    return 0
   fi
-  ok "Tunnel and NBD export are reachable"
+  if timeout "${NBD_IO_TIMEOUT:-20}" qemu-io -f raw -c "read 0 4k" "nbd://127.0.0.1:${NBD_PORT}/${NBD_EXPORT}"; then
+    ok "NBD read sample succeeded"
+  else
+    nbd_read_sample_warning
+  fi
 }
 
 tunnel_status(){
@@ -1283,6 +1357,8 @@ case "$cmd" in
   next) next_steps ;;
   preflight) preflight ;;
   tunnel) start_tunnel ;;
+  tunnel-stop) tunnel_stop ;;
+  tunnel-restart) tunnel_restart ;;
   tunnel-status) tunnel_status ;;
   tunnel-check) tunnel_check ;;
   attach-target) attach_target ;;

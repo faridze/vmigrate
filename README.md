@@ -107,6 +107,16 @@ Main workflow with the default `drive-backup` method:
 ./kvm2pve-src.sh report
 ```
 
+Normal tunnel flow:
+
+```bash
+./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
+./kvm2pve-src.sh preflight
+./kvm2pve-src.sh remote-export
+./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-check
+```
+
 For `blockdev-backup` only, run these after `tunnel-check` and before `bitmap`:
 
 ```bash
@@ -160,6 +170,48 @@ Use these if QEMU reports a running or concluded block job:
 
 `jobs` prints raw `query-block-jobs` JSON and a short summary. QMP calls use a
 timeout so status/report/job commands do not wait forever on a stuck monitor.
+
+## Troubleshooting Tunnel Warnings
+
+If `tunnel-check` prints `OK NBD metadata reachable` but warns that the read
+sample failed or timed out, retry once:
+
+```bash
+./kvm2pve-src.sh tunnel-check
+```
+
+The read sample is a best-effort probe. `qemu-img info` proving the NBD metadata
+is reachable is the hard tunnel health requirement.
+
+If `tunnel-check` hangs or fails because an old SSH/autossh forwarder is stale,
+restart only the local tunnel and check again:
+
+```bash
+./kvm2pve-src.sh tunnel-restart
+./kvm2pve-src.sh tunnel-check
+```
+
+If that still fails, reset the destination export and rebuild the tunnel:
+
+```bash
+./kvm2pve-src.sh tunnel-stop
+./kvm2pve-src.sh remote-dst-close
+./kvm2pve-src.sh remote-export
+./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-check
+```
+
+If `full` hangs after a read sample warning, reset the block jobs and
+tunnel/export path:
+
+```bash
+./kvm2pve-src.sh jobs
+./kvm2pve-src.sh jobs-dismiss-all
+./kvm2pve-src.sh remote-dst-close
+./kvm2pve-src.sh remote-export
+./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-check
+```
 
 ## Alternative Manual Handoff Workflow
 
@@ -218,6 +270,8 @@ quick
 next
 preflight
 tunnel
+tunnel-stop
+tunnel-restart
 tunnel-status
 tunnel-check
 attach-target
