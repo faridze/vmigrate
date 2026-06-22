@@ -2,17 +2,16 @@
 
 Low-downtime KVM/Virtualizor to Proxmox disk migration helper.
 
-This repository uses the tested QMP workflow:
+The supported production workflow is the CLI in `kvm2pve-src.sh` and
+`kvm2pve-dst.sh`. The old whiptail UI is kept only as legacy/experimental code
+under `legacy/kvm2pve-ui.sh` and is not part of the supported migration path.
 
-```text
-blockdev-add target NBD node
-block-dirty-bitmap-add
-blockdev-backup sync=full
-blockdev-backup sync=incremental
-final incremental during cutover
-```
+The default production backup method is `drive-backup`, which writes directly to
+the destination NBD export. `blockdev-backup` remains available for modern QEMU
+block graph workflows, but it requires `attach-target` and `check-target`.
 
-`drive_mirror`, old `virsh blockcopy --pivot`, and legacy wrapper files are not used.
+`drive_mirror`, old `virsh blockcopy --pivot`, and wrapper-driven workflows are
+not used.
 
 ## Prerequisites
 
@@ -74,51 +73,45 @@ qm status VMID
 
 The destination VM must not be running during migration.
 
-## Status
-
-Proof-of-concept validation completed:
-
-- QEMU `blockdev-add` works
-- QEMU dirty bitmap works
-- `blockdev-backup sync=full` works
-- `blockdev-backup sync=incremental` works
-- final incremental worked after source suspend
-- destination Proxmox VM booted after migration test
-
 ## Files
 
 ```text
 kvm2pve-src.sh                 Run on source Virtualizor/KVM host
 kvm2pve-dst.sh                 Run on destination Proxmox host
-kvm2pve-ui.sh                  Optional whiptail terminal UI
+legacy/kvm2pve-ui.sh           Legacy/experimental terminal UI
 examples/kvm2pve.env.example   Example shared config
 ```
 
-## Recommended Remote Workflow (Primary Method)
-
-This is the preferred CLI path when the source host can SSH directly to the
-destination Proxmox host.
+## Supported Remote CLI Workflow
 
 Run from the SOURCE host only. `remote-prepare` writes the remote connection
 settings, copies the destination helper over SSH, runs destination discovery,
-applies the handoff locally, then runs source discovery. Source discovery now
-writes `SRC_DISK`, `QEMU_DEVICE`, and `QEMU_NODE` automatically when the source
-VM has a single unambiguous disk. If multiple source block devices are found,
-run `./kvm2pve-src.sh discover VM_NAME` manually and confirm the correct disk.
+applies the handoff locally, then runs source discovery. Source discovery writes
+`SRC_DISK`, `QEMU_DEVICE`, and `QEMU_NODE` automatically when the source VM has a
+single unambiguous disk. If multiple source block devices are found, run
+`./kvm2pve-src.sh discover VM_NAME` manually and confirm the correct disk.
+
+Main workflow with the default `drive-backup` method:
 
 ```bash
-./kvm2pve-src.sh remote-prepare kvm3023 192.0.2.10 2679 22 root
+./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
+./kvm2pve-src.sh set-backup-method
 ./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh remote-export
 ./kvm2pve-src.sh tunnel
 ./kvm2pve-src.sh tunnel-check
-./kvm2pve-src.sh attach-target
-./kvm2pve-src.sh check-target
 ./kvm2pve-src.sh bitmap
 ./kvm2pve-src.sh check-bitmap
 ./kvm2pve-src.sh full
 ./kvm2pve-src.sh wait-full
 ./kvm2pve-src.sh report
+```
+
+For `blockdev-backup` only, run these after `tunnel-check` and before `bitmap`:
+
+```bash
+./kvm2pve-src.sh attach-target
+./kvm2pve-src.sh check-target
 ```
 
 Optional monitor:
@@ -142,6 +135,31 @@ Start the destination VM only after:
 - final completed successfully
 - source VM stopped
 - destination export closed
+
+## Optional Incremental Sync
+
+Run an incremental sync between full sync and final cutover:
+
+```bash
+./kvm2pve-src.sh incremental
+./kvm2pve-src.sh wait-inc
+```
+
+`incremental` submits job `inc1` only. `wait-inc` waits for the block job to
+finish and dismisses concluded jobs so they do not block later steps.
+
+## Job Tools
+
+Use these if QEMU reports a running or concluded block job:
+
+```bash
+./kvm2pve-src.sh jobs
+./kvm2pve-src.sh job-dismiss inc1
+./kvm2pve-src.sh jobs-dismiss-all
+```
+
+`jobs` prints raw `query-block-jobs` JSON and a short summary. QMP calls use a
+timeout so status/report/job commands do not wait forever on a stuck monitor.
 
 ## Alternative Manual Handoff Workflow
 
@@ -176,18 +194,14 @@ Source:
 ./kvm2pve-src.sh apply-handoff 'KVM2PVE_HANDOFF_V1:...'
 ```
 
-## Terminal UI
+## Legacy/Experimental Terminal UI
+
+The terminal UI is retained for reference only and is not part of the supported
+production workflow:
 
 ```bash
-./kvm2pve-ui.sh
+./legacy/kvm2pve-ui.sh
 ```
-
-New Migration now uses the source-driven remote workflow by default.
-
-## Legacy Manual Workflow
-
-This workflow is kept for troubleshooting and advanced manual operations.
-For normal migrations use the Recommended Remote Workflow.
 
 ## Source Commands
 
@@ -213,7 +227,12 @@ check-bitmap
 full
 wait-full
 mark-full
+set-backup-method
 incremental
+wait-inc
+jobs
+job-dismiss JOB_ID
+jobs-dismiss-all
 cutover-check
 check-paused
 final
@@ -246,28 +265,30 @@ status
 1. Prepare destination VM disk on Proxmox
 2. Run source discovery and confirm config
 3. Apply destination handoff or run remote-prepare from source
-4. Run source preflight
-5. Export destination disk with qemu-nbd using remote-export or destination export
-6. Create SSH tunnel from source to destination NBD
-7. Check tunnel status and validate the NBD export
-8. Add destination NBD as QEMU block node
-9. Create dirty bitmap on source disk node
-10. Run full sync while VM is running
-11. Wait until full sync completes and mark it with wait-full or mark-full
-12. Run cutover-check
-13. Lock customer panel controls
-14. Suspend source VM
-15. Verify source VM is paused
-16. Run final incremental
-17. Stop source VM
-18. Close qemu-nbd export
-19. Boot destination VM
-20. Validate guest services
+4. Choose/confirm backup method with set-backup-method
+5. Run source preflight
+6. Export destination disk with qemu-nbd using remote-export or destination export
+7. Create SSH tunnel from source to destination NBD
+8. Validate the tunnel and the real NBD export with tunnel-check
+9. For blockdev-backup only, add and check the destination target node
+10. Create dirty bitmap on source disk node
+11. Run full sync while VM is running
+12. Wait until full sync completes with wait-full
+13. Run optional incremental syncs with incremental and wait-inc
+14. Run cutover-check
+15. Lock customer panel controls
+16. Suspend source VM through final
+17. Let final run the final incremental and wait internally
+18. Stop source VM
+19. Close qemu-nbd export
+20. Boot destination VM
+21. Validate guest services
 ```
 
 ## Warning
 
-This tool writes directly to the destination VM disk via qemu-nbd.
-Use only with a prepared destination disk.
-Do not point it at a disk containing data you need.
+This tool writes directly to the destination VM disk via qemu-nbd. Use only with
+a prepared destination disk. Do not point it at a disk containing data you need.
 
+`stop-source` only stops/destroys the source VM. It must never delete disks or
+storage.

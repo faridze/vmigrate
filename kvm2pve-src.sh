@@ -2,7 +2,7 @@
 # kvm2pve source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.1"
+VERSION="0.4.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -44,6 +44,10 @@ Usage:
   ./kvm2pve-src.sh mark-full
   ./kvm2pve-src.sh set-backup-method
   ./kvm2pve-src.sh incremental
+  ./kvm2pve-src.sh wait-inc
+  ./kvm2pve-src.sh jobs
+  ./kvm2pve-src.sh job-dismiss JOB_ID
+  ./kvm2pve-src.sh jobs-dismiss-all
   ./kvm2pve-src.sh cutover-check
   ./kvm2pve-src.sh check-paused
   ./kvm2pve-src.sh final
@@ -81,6 +85,8 @@ load_config(){
   TUNNEL_MODE="${TUNNEL_MODE:-autossh}"
   AUTOSSH_MONITOR_PORT="${AUTOSSH_MONITOR_PORT:-20000}"
   BACKUP_METHOD="${BACKUP_METHOD:-drive-backup}"
+  QMP_TIMEOUT="${QMP_TIMEOUT:-20}"
+  CHECK_TIMEOUT="${CHECK_TIMEOUT:-8}"
 }
 
 get_conf(){ local key="$1"; [[ -f "$CONFIG_FILE" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$CONFIG_FILE"; }
@@ -237,6 +243,8 @@ Proxmox disk   : $PVE_DISK
 NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 Tunnel mode    : $TUNNEL_MODE
 Backup method  : ${BACKUP_METHOD:-drive-backup}
+QMP timeout    : ${QMP_TIMEOUT:-20}s
+Check timeout  : ${CHECK_TIMEOUT:-8}s
 EOF
 }
 
@@ -318,7 +326,7 @@ handoff_applied(){ conf_present PVE_VMID && conf_present PVE_DISK && conf_presen
 pve_host_set(){ local host; host="$(get_conf PVE_HOST)"; [[ -n "$host" && "$host" != "CHANGE_ME" ]]; }
 
 next_steps(){
-  local vm pve_host
+  local vm pve_host method effective full_started full_completed final_completed source_stopped bitmap_ok tunnel_ok
 
   if [[ ! -f "$CONFIG_FILE" ]]; then
     cat <<EOF
@@ -334,15 +342,39 @@ EOF
 
   vm="$(conf_value VM_NAME VM_NAME)"
   pve_host="$(conf_value PVE_HOST CHANGE_ME)"
+  method="$(conf_value BACKUP_METHOD drive-backup)"
+  full_started="$(state_get FULL_STARTED)"; full_started="${full_started:-0}"
+  full_completed="$(state_get FULL_COMPLETED)"; full_completed="${full_completed:-0}"
+  final_completed="$(state_get FINAL_COMPLETED)"; final_completed="${final_completed:-0}"
+  source_stopped="$(state_get SOURCE_STOPPED)"; source_stopped="${source_stopped:-0}"
+
+  if source_discovered && handoff_applied && pve_host_set; then
+    load_config
+    effective="$(effective_backup_method)"
+    if tunnel_health_ok >/dev/null 2>&1; then tunnel_ok="yes"; else tunnel_ok="no"; fi
+    if bitmap_exists >/dev/null 2>&1; then bitmap_ok="yes"; else bitmap_ok="no"; fi
+  else
+    effective="$method"
+    tunnel_ok="unknown"
+    bitmap_ok="unknown"
+  fi
 
   cat <<EOF
 Current state
 -------------
 Config file       : $CONFIG_FILE
 VM name           : $vm
+Backup method     : $method
+Effective method  : $effective
 Source discovered : $(status_word source_discovered)
 Handoff applied   : $(status_word handoff_applied)
 Proxmox host set  : $(status_word pve_host_set) ($pve_host)
+Tunnel healthy    : $tunnel_ok
+Bitmap present    : $bitmap_ok
+FULL_STARTED      : $full_started
+FULL_COMPLETED    : $full_completed
+FINAL_COMPLETED   : $final_completed
+SOURCE_STOPPED    : $source_stopped
 
 Suggested next
 --------------
@@ -355,33 +387,29 @@ EOF
   elif ! handoff_applied; then
     echo "./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN"
   elif ! pve_host_set; then
-    echo "Set PVE_HOST in $CONFIG_FILE, then run: ./kvm2pve-src.sh preflight"
+    echo "Set PVE_HOST in $CONFIG_FILE, then run: ./kvm2pve-src.sh remote-prepare or ./kvm2pve-src.sh preflight"
+  elif [[ "$tunnel_ok" != "yes" ]]; then
+    echo "./kvm2pve-src.sh remote-export"
+    echo "./kvm2pve-src.sh tunnel"
+    echo "./kvm2pve-src.sh tunnel-check"
+  elif [[ "$bitmap_ok" != "yes" ]]; then
+    if [[ "$effective" == "blockdev-backup" ]]; then
+      echo "./kvm2pve-src.sh attach-target"
+      echo "./kvm2pve-src.sh check-target"
+    fi
+    echo "./kvm2pve-src.sh bitmap"
+    echo "./kvm2pve-src.sh check-bitmap"
+  elif [[ "$full_started" != "1" ]]; then
+    echo "./kvm2pve-src.sh full"
+  elif [[ "$full_completed" != "1" ]]; then
+    echo "./kvm2pve-src.sh wait-full"
+  elif [[ "$final_completed" != "1" ]]; then
+    echo "./kvm2pve-src.sh cutover-check"
+    echo "./kvm2pve-src.sh final"
+  elif [[ "$source_stopped" != "1" ]]; then
+    echo "./kvm2pve-src.sh stop-source"
   else
-    cat <<EOF
-1) Prepare the destination export from the source, then run the full sync:
-./kvm2pve-src.sh preflight
-./kvm2pve-src.sh remote-export
-./kvm2pve-src.sh tunnel
-./kvm2pve-src.sh tunnel-check
-./kvm2pve-src.sh attach-target
-./kvm2pve-src.sh check-target
-./kvm2pve-src.sh bitmap
-./kvm2pve-src.sh check-bitmap
-./kvm2pve-src.sh full
-./kvm2pve-src.sh wait-full
-./kvm2pve-src.sh report
-
-2) Keep cutover explicit:
-./kvm2pve-src.sh cutover-check
-./kvm2pve-src.sh final
-./kvm2pve-src.sh report
-./kvm2pve-src.sh stop-source
-
-3) After final, close the remote destination export:
-./kvm2pve-src.sh remote-dst-close
-
-Then boot the destination manually on Proxmox.
-EOF
+    echo "./kvm2pve-src.sh remote-dst-close"
   fi
 }
 
@@ -424,17 +452,27 @@ remote_ssh_batch(){
 }
 
 remote_prepare_next_steps(){
+  load_config
+  local effective
+  effective="$(effective_backup_method)"
   cat <<EOF
 
 Destination is prepared remotely.
 Now run:
 
+./kvm2pve-src.sh set-backup-method
 ./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh remote-export
 ./kvm2pve-src.sh tunnel
 ./kvm2pve-src.sh tunnel-check
+EOF
+  if [[ "$effective" == "blockdev-backup" ]]; then
+    cat <<EOF
 ./kvm2pve-src.sh attach-target
 ./kvm2pve-src.sh check-target
+EOF
+  fi
+  cat <<EOF
 ./kvm2pve-src.sh bitmap
 ./kvm2pve-src.sh check-bitmap
 ./kvm2pve-src.sh full
@@ -521,7 +559,7 @@ remote_dst_close(){
   remote_ssh "cd '$(remote_dir)' && ./kvm2pve-dst.sh close"
 }
 
-qmp(){ local json="$1"; virsh qemu-monitor-command "$VM_NAME" --pretty "$json"; }
+qmp(){ local json="$1"; timeout "${QMP_TIMEOUT:-20}" virsh qemu-monitor-command "$VM_NAME" --pretty "$json"; }
 
 parse_info_block(){
   awk '
@@ -535,7 +573,15 @@ parse_info_block(){
 }
 
 block_jobs_json(){ load_config; qmp '{"execute":"query-block-jobs"}'; }
-block_jobs_empty(){ ! block_jobs_json | grep -q '"type"'; }
+block_jobs_empty(){
+  local out
+  out="$(block_jobs_json 2>/dev/null)" || return 1
+  if printf '%s\n' "$out" | grep -q '"error"'; then
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  ! printf '%s\n' "$out" | grep -q '"type"'
+}
 block_jobs_query_ok_empty(){
   local out
   out="$(block_jobs_json 2>/dev/null)" || return 1
@@ -545,11 +591,26 @@ block_jobs_query_ok_empty(){
   fi
   ! printf '%s\n' "$out" | grep -q '"type"'
 }
+block_job_ids_from_json(){ awk -F'"' '/"device"/ {print $4}'; }
+block_jobs_summary(){
+  awk -F'[:,]' '
+    /"device"/ {gsub(/[ "]/,"",$2); device=$2}
+    /"status"/ {gsub(/[ "]/,"",$2); status=$2}
+    /"offset"/ {gsub(/[^0-9]/,"",$2); offset=$2}
+    /"len"/ {gsub(/[^0-9]/,"",$2); len=$2}
+    /}/ {
+      if (device != "") {
+        pct="n/a"; if (len > 0) pct=int((offset*100)/len) "%"
+        printf "Job %s: status=%s progress=%s offset=%s len=%s\n", device, status, pct, offset, len
+      }
+      device=""; status=""; offset=""; len=""
+    }'
+}
 wait_jobs_empty(){
   load_config
   local out job status
   while true; do
-    out="$(block_jobs_json)"
+    out="$(block_jobs_json)" || die "QMP query timed out or failed while waiting for block jobs"
     if printf '%s\n' "$out" | grep -q '"error"'; then
       printf '%s\n' "$out"
       die "Block job ended with an error"
@@ -566,7 +627,9 @@ wait_jobs_empty(){
       /"status"/ {gsub(/[",]/,"",$2); status=$2}
       END { if (len > 0) printf "Progress: %d%% | %s / %s | Status: %s\n", int((offset*100)/len), offset, len, status; else print "Block job running" }'
     if [[ "$status" == "concluded" ]]; then
-      [[ -n "$job" ]] && job_dismiss "$job"
+      if [[ -n "$job" ]]; then
+        job_dismiss "$job" || warn "Could not dismiss concluded job: $job"
+      fi
       ok "Block job concluded"
       return 0
     fi
@@ -574,7 +637,7 @@ wait_jobs_empty(){
   done
 }
 
-bitmap_exists(){ load_config; qmp '{"execute":"query-block"}' | grep -q "\"name\": \"$BITMAP\""; }
+bitmap_exists(){ load_config; qmp '{"execute":"query-block"}' 2>/dev/null | grep -q "\"name\": \"$BITMAP\""; }
 target_node_exists(){ load_config; qmp '{"execute":"query-named-block-nodes"}' 2>/dev/null | grep -q "\"node-name\": \"$TARGET_NODE\""; }
 
 verify_target_node(){
@@ -743,10 +806,37 @@ start_tunnel(){
   echo "Run next: ./kvm2pve-src.sh tunnel-check"
 }
 
+nbd_failure_message(){
+  cat <<EOF
+ERROR NBD export did not respond within ${CHECK_TIMEOUT:-8}s. Restart tunnel/export:
+./kvm2pve-src.sh remote-dst-close
+./kvm2pve-src.sh remote-export
+./kvm2pve-src.sh tunnel
+./kvm2pve-src.sh tunnel-check
+EOF
+}
+
+tunnel_health_ok(){
+  load_config
+  command -v ss >/dev/null 2>&1 || return 1
+  command -v qemu-img >/dev/null 2>&1 || return 1
+  command -v qemu-io >/dev/null 2>&1 || return 1
+  ss -lntp | grep "127.0.0.1:${NBD_PORT}" >/dev/null || return 1
+  timeout "${CHECK_TIMEOUT:-8}" qemu-img info "nbd:127.0.0.1:${NBD_PORT}:exportname=${NBD_EXPORT}" >/dev/null || return 1
+  timeout "${CHECK_TIMEOUT:-8}" qemu-io -f raw -c "read 0 4k" "nbd://127.0.0.1:${NBD_PORT}/${NBD_EXPORT}" >/dev/null || return 1
+}
+
 tunnel_check(){
-  load_config; need ss; need qemu-img
+  load_config; need ss; need qemu-img; need qemu-io; need timeout
   ss -lntp | grep "127.0.0.1:${NBD_PORT}" >/dev/null || die "No local tunnel listener on 127.0.0.1:${NBD_PORT}"
-  qemu-img info "nbd:127.0.0.1:${NBD_PORT}:exportname=${NBD_EXPORT}"
+  if ! timeout "${CHECK_TIMEOUT:-8}" qemu-img info "nbd:127.0.0.1:${NBD_PORT}:exportname=${NBD_EXPORT}"; then
+    nbd_failure_message >&2
+    return 1
+  fi
+  if ! timeout "${CHECK_TIMEOUT:-8}" qemu-io -f raw -c "read 0 4k" "nbd://127.0.0.1:${NBD_PORT}/${NBD_EXPORT}"; then
+    nbd_failure_message >&2
+    return 1
+  fi
   ok "Tunnel and NBD export are reachable"
 }
 
@@ -853,8 +943,67 @@ effective_backup_method(){
 }
 
 job_dismiss(){
-  local job="$1"
-  qmp '{"execute":"job-dismiss","arguments":{"id":"'"$job"'"}}' >/dev/null 2>&1 || true
+  local job="$1" out
+  out="$(qmp '{"execute":"job-dismiss","arguments":{"id":"'"$job"'"}}' 2>/dev/null)" || return 1
+  printf '%s\n' "$out" | grep -q '"error"' && return 2
+  return 0
+}
+
+jobs_cmd(){
+  load_config
+  local out
+  if ! out="$(block_jobs_json 2>/dev/null)"; then
+    warn "QMP query timed out"
+    return 1
+  fi
+  printf '%s\n' "$out"
+  if printf '%s\n' "$out" | grep -q '"type"'; then
+    echo
+    echo "Summary:"
+    printf '%s\n' "$out" | block_jobs_summary
+  else
+    echo
+    echo "Summary: no block jobs"
+  fi
+}
+
+job_dismiss_cmd(){
+  load_config
+  local job="${1:-}" out
+  [[ -n "$job" ]] || die "Usage: ./kvm2pve-src.sh job-dismiss JOB_ID"
+  if ! out="$(qmp '{"execute":"job-dismiss","arguments":{"id":"'"$job"'"}}' 2>/dev/null)"; then
+    die "QMP job-dismiss timed out or failed"
+  fi
+  if printf '%s\n' "$out" | grep -q '"error"'; then
+    printf '%s\n' "$out"
+    warn "not found or already dismissed: $job"
+    return 0
+  fi
+  printf '%s\n' "$out"
+  ok "dismissed: $job"
+}
+
+jobs_dismiss_all(){
+  load_config
+  local out job rc any=0
+  if ! out="$(block_jobs_json 2>/dev/null)"; then
+    die "QMP query timed out"
+  fi
+  while IFS= read -r job; do
+    [[ -n "$job" ]] || continue
+    any=1
+    echo "Dismissing job: $job"
+    set +e
+    job_dismiss "$job"
+    rc=$?
+    set -e
+    case "$rc" in
+      0) ok "dismissed" ;;
+      2) warn "not found" ;;
+      *) die "QMP job-dismiss timed out or failed for $job" ;;
+    esac
+  done < <(printf '%s\n' "$out" | block_job_ids_from_json)
+  (( any )) || echo "No jobs to dismiss"
 }
 
 backup_job(){
@@ -948,9 +1097,21 @@ wait_full(){
   ok "Full sync marked completed: $(state_file)"
 }
 
+incremental_sync(){
+  backup_job incremental inc1
+  ok "Incremental sync job submitted. Run: ./kvm2pve-src.sh wait-inc"
+}
+
+wait_inc(){
+  load_config
+  wait_jobs_empty
+  ok "Incremental sync completed"
+}
+
 report(){
   load_config
   state_sync_identity
+  local out
   cat <<EOF
 Migration report
 ----------------
@@ -982,19 +1143,21 @@ EOF
   if out="$(block_jobs_json 2>/dev/null)"; then
     if printf '%s\n' "$out" | grep -q '"type"'; then
       printf '%s\n' "$out"
+      printf '%s\n' "$out" | block_jobs_summary
     elif printf '%s\n' "$out" | grep -q '"error"'; then
       printf '%s\n' "$out"
     else
       echo "none"
     fi
   else
-    echo "unavailable"
+    warn "QMP query timed out"
   fi
 }
 
 cutover_check(){
   load_config
-  local failed=0 state out
+  local failed=0 state method
+  method="$(effective_backup_method)"
   check_ok(){ printf 'OK   %s\n' "$1"; }
   check_fail(){ printf 'FAIL %s\n' "$1"; failed=1; }
 
@@ -1004,10 +1167,14 @@ cutover_check(){
   case "$state" in running|paused|pmsuspended) check_ok "VM is running or paused ($state)" ;; *) check_fail "VM is running or paused (${state:-unknown})" ;; esac
 
   if block_jobs_query_ok_empty >/dev/null; then check_ok "No active block job"; else check_fail "No active block job"; fi
-  if target_node_exists; then check_ok "Target node exists"; else check_fail "Target node exists"; fi
+  if [[ "$method" == "blockdev-backup" ]]; then
+    if target_node_exists; then check_ok "Target node exists"; else check_fail "Target node exists"; fi
+  else
+    check_ok "Target node not required for drive-backup"
+  fi
   if bitmap_exists; then check_ok "Bitmap exists"; else check_fail "Bitmap exists"; fi
   if command -v ss >/dev/null 2>&1 && ss -lntp | grep "127.0.0.1:${NBD_PORT}" >/dev/null; then check_ok "Local tunnel listener 127.0.0.1:${NBD_PORT}"; else check_fail "Local tunnel listener 127.0.0.1:${NBD_PORT}"; fi
-  if command -v qemu-img >/dev/null 2>&1 && qemu-img info "nbd:127.0.0.1:${NBD_PORT}:exportname=${NBD_EXPORT}" >/dev/null 2>&1; then check_ok "NBD export reachable"; else check_fail "NBD export reachable"; fi
+  if tunnel_health_ok >/dev/null 2>&1; then check_ok "NBD export reachable"; else check_fail "NBD export reachable"; fi
   if state_is_full_completed; then check_ok "FULL_COMPLETED=1"; else check_fail "FULL_COMPLETED=1"; fi
 
   return "$failed"
@@ -1049,9 +1216,18 @@ watch_jobs(){
 
 status(){
   load_config
+  local out
   virsh domstate "$VM_NAME" || true
-  qmp '{"execute":"query-block-jobs"}' || true
-  qmp '{"execute":"query-block"}' | grep -A20 -B5 "$BITMAP" || true
+  if out="$(qmp '{"execute":"query-block-jobs"}' 2>/dev/null)"; then
+    printf '%s\n' "$out"
+  else
+    warn "QMP query timed out"
+  fi
+  if out="$(qmp '{"execute":"query-block"}' 2>/dev/null)"; then
+    printf '%s\n' "$out" | grep -A20 -B5 "$BITMAP" || true
+  else
+    warn "QMP query timed out"
+  fi
 }
 
 final_cutover(){
@@ -1117,7 +1293,11 @@ case "$cmd" in
   wait-full) wait_full ;;
   mark-full) mark_full ;;
   set-backup-method) select_backup_method ;;
-  incremental) backup_job incremental inc1 ;;
+  incremental) incremental_sync ;;
+  wait-inc) wait_inc ;;
+  jobs) jobs_cmd ;;
+  job-dismiss) job_dismiss_cmd "${1:-}" ;;
+  jobs-dismiss-all) jobs_dismiss_all ;;
   cutover-check) cutover_check ;;
   check-paused) check_paused ;;
   final) final_cutover ;;
