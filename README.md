@@ -94,7 +94,7 @@ single unambiguous disk. If multiple source block devices are found, run
 Main workflow with the default `drive-backup` method:
 
 ```bash
-./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
+./kvm2pve-src.sh remote-prepare VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]
 ./kvm2pve-src.sh set-backup-method
 ./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh remote-export
@@ -110,7 +110,7 @@ Main workflow with the default `drive-backup` method:
 Normal tunnel flow:
 
 ```bash
-./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
+./kvm2pve-src.sh remote-prepare VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]
 ./kvm2pve-src.sh preflight
 ./kvm2pve-src.sh remote-export
 ./kvm2pve-src.sh tunnel
@@ -265,7 +265,7 @@ discover [VM_NAME] [--yes]
 init
 show
 apply-handoff
-remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
+remote-prepare VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]
 remote-export
 remote-dst-status
 remote-dst-close

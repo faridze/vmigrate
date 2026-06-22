@@ -24,7 +24,7 @@ Usage:
   ./kvm2pve-src.sh init
   ./kvm2pve-src.sh show
   ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
-  ./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
+  ./kvm2pve-src.sh remote-prepare VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]
   ./kvm2pve-src.sh remote-export
   ./kvm2pve-src.sh remote-dst-status
   ./kvm2pve-src.sh remote-dst-close
@@ -492,7 +492,7 @@ remote_prepare(){
   local vm="${1:-}" pve_host="${2:-}" pve_vmid="${3:-}" ssh_port="${4:-22}" ssh_user="${5:-root}"
   local dst_script rdir token prefix="KVM2PVE_HANDOFF_V1:"
 
-  [[ -n "$vm" && -n "$pve_host" && -n "$pve_vmid" ]] || die "Usage: ./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]"
+  [[ -n "$vm" && -n "$pve_host" && -n "$pve_vmid" ]] || die "Usage: ./kvm2pve-src.sh remote-prepare VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]"
   case "$pve_vmid" in *[!0-9]*|'') die "Destination Proxmox VMID must be numeric" ;; esac
   case "$ssh_port" in *[!0-9]*|'') die "SSH port must be numeric" ;; esac
   [[ -f "$SCRIPT_DIR/kvm2pve-src.sh" ]] || die "Source helper missing: $SCRIPT_DIR/kvm2pve-src.sh"
@@ -1427,7 +1427,7 @@ case "$cmd" in
   discover) discover "$@" ;;
   show) show_config ;;
   apply-handoff) apply_handoff "${1:-}" ;;
-  remote-prepare|migrate-prepare) remote_prepare "${1:-}" "${2:-}" "${3:-}" "${4:-22}" "${5:-root}" ;;
+  remote-prepare|migrate-prepare) remote_prepare "${1:-}" "${3:-}" "${2:-}" "${4:-22}" "${5:-root}" ;;
   remote-export) remote_export ;;
   remote-dst-status) remote_dst_status ;;
   remote-dst-close) remote_dst_close ;;
