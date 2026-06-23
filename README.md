@@ -87,7 +87,7 @@ examples/kvm2pve.env.example   Example shared config
 Use `migrate` for the supported CLI replacement for the abandoned UI:
 
 ```bash
-./kvm2pve-src.sh migrate v2698 2697 45.89.237.162 2112 root
+./kvm2pve-src.sh migrate VM_NAME PVE_VMID 192.0.2.10 22 root
 ```
 
 Argument order is:
