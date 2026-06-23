@@ -105,6 +105,11 @@ A `qemu-io` read sample warning from `tunnel-check` does not block migration whe
 NBD metadata is reachable. The real validation is that FULL sync starts and
 `wait-full` shows progress.
 
+The `migrate` workflow optionally performs a pre-cutover incremental
+synchronization while the source VM is still running. This minimizes downtime
+because most changed blocks are transferred before the VM is suspended for the
+final synchronization.
+
 The workflow never deletes disks, never undefines VMs, never wipes filesystems,
 and never removes LVs or storage.
 

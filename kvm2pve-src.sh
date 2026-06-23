@@ -73,6 +73,17 @@ ask_exact(){
   read -r -p "$prompt " ans
   [[ "$ans" == "$expected" ]]
 }
+ask_yes_default(){
+  local prompt="$1" ans
+  while true; do
+    read -r -p "$prompt [Y/n]: " ans
+    case "$ans" in
+      ""|Y|y) return 0 ;;
+      N|n) return 1 ;;
+      *) echo "Please answer Y or N." ;;
+    esac
+  done
+}
 
 sanitize_name(){ printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '-'; }
 default_bitmap(){ printf 'kvm2pve-bitmap-%s' "$(sanitize_name "$1")"; }
@@ -1545,7 +1556,30 @@ EOF
     return 0
   fi
 
+  if ask_yes_default "Run pre-cutover incremental sync first?"; then
+    cat <<EOF
+
+Starting pre-cutover incremental sync while source VM remains running...
+EOF
+    incremental_sync
+    wait_inc
+
+    echo
+    report
+
+    cat <<EOF
+
+Pre-cutover incremental completed.
+Source VM is still running.
+EOF
+  fi
+
   cutover_check
+  cat <<EOF
+
+Suspend source VM and run FINAL incremental now?
+EOF
+  ask_exact "Type CUTOVER:" "CUTOVER" || die "Aborted"
   final_cutover_run
   report
 
