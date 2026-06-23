@@ -1470,6 +1470,99 @@ stop_source(){
 }
 
 
+migration_active_tunnels(){
+  local nbd_port old_host
+  nbd_port="$(get_conf NBD_PORT)"
+  nbd_port="${nbd_port:-10809}"
+  old_host="$(get_conf PVE_HOST)"
+  command -v pgrep >/dev/null 2>&1 || return 1
+  pgrep -af '(^|/)(autossh|ssh)( |$)' 2>/dev/null | awk -v fwd="${nbd_port}:127.0.0.1:${nbd_port}" -v host="$old_host" '
+    index($0, fwd) && (host == "" || index($0, host)) {print}
+  '
+}
+
+migration_block_jobs_summary(){
+  local old_vm qmp_timeout out
+  old_vm="$(get_conf VM_NAME)"
+  [[ -n "$old_vm" ]] || return 1
+  command -v virsh >/dev/null 2>&1 || return 1
+  command -v timeout >/dev/null 2>&1 || return 1
+  qmp_timeout="$(get_conf QMP_TIMEOUT)"
+  qmp_timeout="${qmp_timeout:-20}"
+  if out="$(timeout "$qmp_timeout" virsh qemu-monitor-command "$old_vm" --pretty '{"execute":"query-block-jobs"}' 2>/dev/null)"; then
+    if printf '%s\n' "$out" | grep -q '"type"'; then
+      echo "VM $old_vm:"
+      printf '%s\n' "$out" | block_jobs_summary
+      return 0
+    fi
+  fi
+  return 1
+}
+
+migration_state_files_for_other_vm(){
+  local vm="$1" wanted dir f base found=0
+  wanted=".kvm2pve-state-$(sanitize_name "$vm")"
+  dir="$(config_dir)"
+  shopt -s nullglob
+  for f in "$dir"/.kvm2pve-state-*; do
+    base="${f##*/}"
+    [[ "$base" == "$wanted" ]] && continue
+    printf '%s\n' "$f"
+    found=1
+  done
+  shopt -u nullglob
+  (( found ))
+}
+
+migrate_preparation_guard(){
+  local vm="$1" tunnels jobs states found=0
+  tunnels="$(migration_active_tunnels || true)"
+  jobs="$(migration_block_jobs_summary || true)"
+  states="$(migration_state_files_for_other_vm "$vm" || true)"
+
+  [[ -n "$tunnels" ]] && found=1
+  [[ -n "$jobs" ]] && found=1
+  [[ -n "$states" ]] && found=1
+  (( found )) || return 0
+
+  cat <<EOF
+
+Previous migration artifacts detected:
+EOF
+  if [[ -n "$tunnels" ]]; then
+    cat <<EOF
+
+Active SSH/autossh tunnel(s):
+$tunnels
+EOF
+  fi
+  if [[ -n "$jobs" ]]; then
+    cat <<EOF
+
+Active qemu block job(s):
+$jobs
+EOF
+  fi
+  if [[ -n "$states" ]]; then
+    cat <<EOF
+
+State file(s) for another VM:
+$states
+EOF
+  fi
+
+  echo
+  echo "A previous migration session appears to exist."
+  if ! ask_yes_default "Clean migration artifacts and continue?"; then
+    die "Aborted"
+  fi
+
+  [[ -f "$CONFIG_FILE" ]] || die "Cannot clean migration artifacts because config is missing: $CONFIG_FILE"
+  tunnel_stop || warn "No local tunnel stopped or tunnel-stop failed."
+  remote_dst_close || warn "No remote NBD export closed or remote close failed."
+  jobs_dismiss_all
+}
+
 migrate_workflow(){
   local vm="$1" pve_vmid="$2" pve_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}"
 
@@ -1488,6 +1581,7 @@ SSH              : ${ssh_user}@${pve_host}:${ssh_port}
 Backup method    : drive-backup
 EOF
 
+  migrate_preparation_guard "$vm"
   ask_exact "Continue with preparation? Type YES:" "YES" || die "Aborted"
 
   # remote_prepare internal signature is: VM_NAME PVE_HOST PVE_VMID SSH_PORT SSH_USER
@@ -1496,10 +1590,6 @@ EOF
 
   write_key BACKUP_METHOD drive-backup
   load_config
-
-  warn "Resetting any stale tunnel/export before starting."
-  tunnel_stop || warn "No local tunnel stopped or tunnel-stop failed."
-  remote_dst_close || warn "No remote NBD export closed or remote close failed."
 
   remote_export
   start_tunnel
