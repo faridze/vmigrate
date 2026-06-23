@@ -133,9 +133,11 @@ next_hint(){
 }
 
 start_log(){
-  local vm="${1:-unknown}" log_dir
+  local vm="${1:-unknown}" log_dir was_tty=0
   [[ "${VMIGRATE_LOG:-1}" == "0" ]] && return 0
   (( LOG_STARTED )) && return 0
+
+  [[ -t 1 ]] && was_tty=1
 
   log_dir="$(config_dir)"
   mkdir -p "$log_dir"
@@ -143,6 +145,7 @@ start_log(){
   LOG_STARTED=1
 
   exec > >(tee -a "$LOG_FILE") 2>&1
+  [[ "$was_tty" == "1" ]] && VMIGRATE_PROGRESS_COMPACT=1
   ok "Log file: $LOG_FILE"
 }
 
@@ -749,7 +752,7 @@ progress_from_jobs_json(){
 wait_jobs_empty(){
   load_config
   local out job status parsed_status progress offset len compact=0 compact_printed=0
-  if [[ -t 1 && "${DEBUG:-0}" != "1" ]]; then
+  if [[ "${DEBUG:-0}" != "1" ]] && { [[ -t 1 ]] || [[ "${VMIGRATE_PROGRESS_COMPACT:-0}" == "1" ]]; }; then
     compact=1
   fi
   while true; do
