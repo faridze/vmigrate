@@ -126,6 +126,8 @@ config_dir(){ case "$CONFIG_FILE" in */*) printf '%s' "${CONFIG_FILE%/*}" ;; *) 
 IN_CREATE_WORKFLOW=0
 LOG_STARTED=0
 LOG_FILE=""
+RUN_ID=""
+RUN_DIR=""
 
 in_create_workflow(){ [[ "${IN_CREATE_WORKFLOW:-0}" == "1" ]]; }
 
@@ -135,21 +137,25 @@ next_hint(){
 }
 
 start_log(){
-  local vm="${1:-unknown}" log_dir safe_vm was_tty=0
+  local vm="${1:-unknown}" runs_base safe_vm was_tty=0
   [[ "${VMIGRATE_LOG:-1}" == "0" ]] && return 0
   (( LOG_STARTED )) && return 0
 
   [[ -t 1 ]] && was_tty=1
 
   safe_vm="$(sanitize_name "$vm")"
-  log_dir="${VMIGRATE_LOG_DIR:-$(config_dir)/logs}/${safe_vm}"
-  mkdir -p "$log_dir"
-  LOG_FILE="${log_dir}/vmigrate-$(date '+%Y%m%d-%H%M%S').log"
+  RUN_ID="${RUN_ID:-$(date '+%Y%m%d-%H%M%S')}"
+  runs_base="${VMIGRATE_RUNS_DIR:-$(config_dir)/migrations}"
+  RUN_DIR="${runs_base}/${safe_vm}/${RUN_ID}"
+  mkdir -p "$RUN_DIR"
+
+  LOG_FILE="${RUN_DIR}/run.log"
   LOG_STARTED=1
 
   exec > >(tee -a "$LOG_FILE") 2>&1
   [[ "$was_tty" == "1" ]] && VMIGRATE_PROGRESS_COMPACT=1
   ok "Log file: $LOG_FILE"
+  ok "Run directory: $RUN_DIR"
 }
 
 state_file(){
@@ -1829,6 +1835,26 @@ EOF
   fi
 }
 
+archive_config_snapshot(){
+  [[ -n "${RUN_DIR:-}" ]] || return 0
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  cp -a "$CONFIG_FILE" "$RUN_DIR/config" 2>/dev/null || warn "Could not write run config"
+}
+
+archive_report(){
+  local name="${1:-report}" file
+  [[ -n "${RUN_DIR:-}" ]] || return 0
+  file="$RUN_DIR/${name}.txt"
+  {
+    echo "vmigrate archived report"
+    echo "Generated at: $(now_ts)"
+    echo "Run directory: $RUN_DIR"
+    echo
+    report
+  } > "$file" 2>&1 || warn "Could not write archived report: $file"
+  ok "Archived report: $file"
+}
+
 create_workflow(){
   local vm="$1" target_id="$2" target_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}"
 
@@ -1853,6 +1879,7 @@ EOF
   create_preparation_guard "$vm"
   ask_exact "Continue with preparation? Type YES:" "YES" || die "Aborted"
   remote_prepare "$vm" "$target_host" "$target_id" "$ssh_port" "$ssh_user" 0
+  archive_config_snapshot
   preflight
 
   write_key BACKUP_METHOD drive-backup
@@ -1865,6 +1892,7 @@ EOF
   create_bitmap
   check_bitmap
   report
+  archive_report "report.pre-full"
 
   if ! block_jobs_empty; then
     warn "Existing block job found before FULL sync."
@@ -1895,6 +1923,7 @@ EOF
   full_sync
   wait_full
   report
+  archive_report "report.after-full"
 
   cat <<EOF
 
@@ -1933,6 +1962,7 @@ EOF
 
   final_cutover_run
   report
+  archive_report "report.final"
 
   cat <<EOF
 
