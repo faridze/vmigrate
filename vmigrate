@@ -1075,11 +1075,17 @@ tunnel_check(){
     return 1
   fi
   ok "NBD metadata reachable"
+
+  if [[ "${VMIGRATE_NBD_READ_SAMPLE:-0}" != "1" ]]; then
+    ok "NBD read sample skipped. Enable with VMIGRATE_NBD_READ_SAMPLE=1 if needed."
+    return 0
+  fi
+
   if ! command -v qemu-io >/dev/null 2>&1; then
-    nbd_read_sample_warning
     warn "qemu-io not found; skipped read sample."
     return 0
   fi
+
   local i
   for i in 1 2 3; do
     if timeout "${NBD_IO_TIMEOUT:-20}" qemu-io -f raw -c "read 0 4k" "nbd://127.0.0.1:${NBD_PORT}/${NBD_EXPORT}"; then
@@ -1090,7 +1096,8 @@ tunnel_check(){
     sleep 2
   done
 
-  nbd_read_sample_warning
+  warn "NBD metadata is reachable, but optional read sample failed/timed out."
+  warn "Continuing is OK when FULL sync starts and wait-full shows progress."
 }
 
 tunnel_status(){
