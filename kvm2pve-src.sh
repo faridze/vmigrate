@@ -1559,7 +1559,6 @@ EOF
 
   [[ -f "$CONFIG_FILE" ]] || die "Cannot clean migration artifacts because config is missing: $CONFIG_FILE"
   tunnel_stop || warn "No local tunnel stopped or tunnel-stop failed."
-  remote_dst_close || warn "No remote NBD export closed or remote close failed."
   jobs_dismiss_all
 }
 
