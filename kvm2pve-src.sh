@@ -892,10 +892,26 @@ start_tunnel(){
     return 0
   fi
   if [[ "$TUNNEL_MODE" == "autossh" ]]; then need autossh; fi
-  local args=(-f -N -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -L "${NBD_PORT}:127.0.0.1:${NBD_PORT}" -p "$PVE_SSH_PORT" "${PVE_SSH_USER}@${PVE_HOST}")
-  if [[ "$TUNNEL_MODE" == "autossh" ]]; then autossh -M "$AUTOSSH_MONITOR_PORT" "${args[@]}"; else ssh "${args[@]}"; fi
-  ok "Tunnel command sent..."
-  echo "Run next: ./kvm2pve-src.sh tunnel-check"
+  local args=(-f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -L "${NBD_PORT}:127.0.0.1:${NBD_PORT}" -p "$PVE_SSH_PORT" "${PVE_SSH_USER}@${PVE_HOST}")
+  if [[ "$TUNNEL_MODE" == "autossh" ]]; then
+    autossh -M "${AUTOSSH_MONITOR_PORT:-0}" "${args[@]}"
+  else
+    ssh "${args[@]}"
+  fi
+
+  local i
+  for i in $(seq 1 "${CHECK_TIMEOUT:-8}"); do
+    if tunnel_listener_exists; then
+      ok "Tunnel listener is ready on 127.0.0.1:${NBD_PORT}"
+      echo "Run next: ./kvm2pve-src.sh tunnel-check"
+      return 0
+    fi
+    sleep 1
+  done
+
+  ss -lntp | grep "${NBD_PORT}" || true
+  pgrep -af "(${NBD_PORT}:127.0.0.1:${NBD_PORT}|${PVE_HOST})" || true
+  die "Tunnel command was sent, but no local listener appeared on 127.0.0.1:${NBD_PORT}"
 }
 
 tunnel_restart(){
