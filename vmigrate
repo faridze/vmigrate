@@ -1343,34 +1343,35 @@ report(){
   load_config
   state_sync_identity
   local out
-  cat <<EOF
-Migration report
-----------------
-VM name              : $VM_NAME
-Source disk          : ${SRC_DISK:-not set}
-Target ID           : $TARGET_ID
-Target disk         : $TARGET_DISK
-Bitmap               : $BITMAP
-Target node          : $TARGET_NODE
-Backup method        : ${BACKUP_METHOD:-drive-backup}
-Effective method     : $(effective_backup_method)
-State file           : $(state_file)
-FULL_STARTED         : $(state_get FULL_STARTED)
-FULL_STARTED_AT      : $(state_get FULL_STARTED_AT)
-FULL_JOB_ID          : $(state_get FULL_JOB_ID)
-FULL_COMPLETED       : $(state_get FULL_COMPLETED)
-FULL_COMPLETED_AT    : $(state_get FULL_COMPLETED_AT)
-FINAL_COMPLETED      : $(state_get FINAL_COMPLETED)
-FINAL_COMPLETED_AT   : $(state_get FINAL_COMPLETED_AT)
-SOURCE_STOPPED       : $(state_get SOURCE_STOPPED)
-SOURCE_STOPPED_AT    : $(state_get SOURCE_STOPPED_AT)
-EOF
+  report_kv(){ printf '%-20s : %s\n' "$1" "$2"; }
+
+  echo "Migration report"
+  echo "----------------"
+  report_kv "VM name" "$VM_NAME"
+  report_kv "Source disk" "${SRC_DISK:-not set}"
+  report_kv "Target ID" "$TARGET_ID"
+  report_kv "Target disk" "$TARGET_DISK"
+  report_kv "Bitmap" "$BITMAP"
+  report_kv "Target node" "$TARGET_NODE"
+  report_kv "Backup method" "${BACKUP_METHOD:-drive-backup}"
+  report_kv "Effective method" "$(effective_backup_method)"
+  report_kv "State file" "$(state_file)"
+  report_kv "FULL_STARTED" "$(state_get FULL_STARTED)"
+  report_kv "FULL_STARTED_AT" "$(state_get FULL_STARTED_AT)"
+  report_kv "FULL_JOB_ID" "$(state_get FULL_JOB_ID)"
+  report_kv "FULL_COMPLETED" "$(state_get FULL_COMPLETED)"
+  report_kv "FULL_COMPLETED_AT" "$(state_get FULL_COMPLETED_AT)"
+  report_kv "FINAL_COMPLETED" "$(state_get FINAL_COMPLETED)"
+  report_kv "FINAL_COMPLETED_AT" "$(state_get FINAL_COMPLETED_AT)"
+  report_kv "SOURCE_STOPPED" "$(state_get SOURCE_STOPPED)"
+  report_kv "SOURCE_STOPPED_AT" "$(state_get SOURCE_STOPPED_AT)"
+
   if command -v virsh >/dev/null 2>&1; then
-    echo "VM state             : $(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
+    report_kv "VM state" "$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
   else
-    echo "VM state             : virsh not found"
+    report_kv "VM state" "virsh not found"
   fi
-  echo "Active block jobs    :"
+  report_kv "Active block jobs" ""
   if out="$(block_jobs_json 2>/dev/null)"; then
     if printf '%s\n' "$out" | grep -q '"type"'; then
       printf '%s\n' "$out"
