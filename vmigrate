@@ -124,17 +124,23 @@ state_file(){
   local vm
   vm="${VM_NAME:-$(get_conf VM_NAME)}"
   [[ -n "$vm" ]] || vm="unknown"
-  printf '%s/.vmigrate-state-%s' "$(config_dir)" "$(sanitize_name "$vm")"
+  state_file_for_vm "$vm"
 }
+state_file_for_vm(){ printf '%s/.vmigrate-state-%s' "$(config_dir)" "$(sanitize_name "$1")"; }
 state_get(){ local key="$1" file; file="$(state_file)"; [[ -f "$file" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$file"; }
-state_write(){
-  local key="$1" val="$2" file tmp
-  file="$(state_file)"
+state_get_from_file(){ local file="$1" key="$2"; [[ -f "$file" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$file"; }
+state_write_file(){
+  local file="$1" key="$2" val="$3" tmp
   tmp="$(mktemp)"
   [[ -f "$file" ]] && grep -v -E "^${key}=" "$file" > "$tmp" || true
   printf '%s=%s\n' "$key" "$val" >> "$tmp"
   mv "$tmp" "$file"
   chmod 600 "$file" 2>/dev/null || true
+}
+state_write(){
+  local key="$1" val="$2" file
+  file="$(state_file)"
+  state_write_file "$file" "$key" "$val"
 }
 state_sync_identity(){
   state_write VM_NAME "${VM_NAME:-}"
@@ -151,9 +157,14 @@ state_sync_identity(){
   [[ -n "$(state_get SOURCE_STOPPED_AT)" ]] || state_write SOURCE_STOPPED_AT ""
 }
 state_is_full_completed(){ [[ "$(state_get FULL_COMPLETED)" == "1" ]]; }
+state_is_final_completed(){ [[ "$(state_get FINAL_COMPLETED)" == "1" ]]; }
 require_full_completed(){
   state_is_full_completed && return 0
   die "Full sync is not marked as completed. Refusing incremental/final. Run wait-full or mark-full only after confirming full completed successfully."
+}
+require_final_completed(){
+  state_is_final_completed && return 0
+  die "FINAL_COMPLETED=1 is not present in $(state_file). Refusing to stop/destroy the source VM."
 }
 mark_full_completed(){
   load_config
@@ -613,6 +624,18 @@ block_jobs_query_ok_empty(){
   ! printf '%s\n' "$out" | grep -q '"type"'
 }
 block_job_ids_from_json(){ awk -F'"' '/"device"/ {print $4}'; }
+block_jobs_table_from_json(){
+  awk -F'"' '
+    /"device"/ {device=$4}
+    /"status"/ {status=$4}
+    /}/ {
+      if (device != "") {
+        if (status == "") status="unknown"
+        print device "\t" status
+      }
+      device=""; status=""
+    }'
+}
 block_jobs_summary(){
   awk -F'[:,]' '
     /"device"/ {gsub(/[ "]/,"",$2); device=$2}
@@ -897,10 +920,11 @@ start_tunnel(){
   [[ "$TARGET_HOST" != "CHANGE_ME" ]] || die "Set TARGET_HOST in $CONFIG_FILE"
   if [[ "$TUNNEL_MODE" == "direct" ]]; then warn "Direct mode selected; no SSH tunnel started"; return; fi
   if tunnel_listener_exists; then
-    warn "Tunnel listener already exists on 127.0.0.1:${NBD_PORT}"
-    echo "Run: ./vmigrate tunnel-check"
-    echo "If stale, run: ./vmigrate tunnel-restart"
-    return 0
+    if tunnel_health_ok >/dev/null 2>&1; then
+      ok "Existing tunnel listener is healthy; reusing 127.0.0.1:${NBD_PORT}"
+      return 0
+    fi
+    die "A stale or unhealthy tunnel listener already exists on 127.0.0.1:${NBD_PORT}. Run: ./vmigrate tunnel-restart"
   fi
   if [[ "$TUNNEL_MODE" == "autossh" ]]; then need autossh; fi
   local args=(-f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -L "${NBD_PORT}:127.0.0.1:${NBD_PORT}" -p "$TARGET_SSH_PORT" "${TARGET_SSH_USER}@${TARGET_HOST}")
@@ -1136,25 +1160,37 @@ job_dismiss_cmd(){
 
 jobs_dismiss_all(){
   load_config
-  local out job rc any=0
+  local out job status rc any=0 dismissed=0
   if ! out="$(block_jobs_json 2>/dev/null)"; then
     die "QMP query timed out"
   fi
-  while IFS= read -r job; do
+  if printf '%s\n' "$out" | grep -q '"error"'; then
+    printf '%s\n' "$out"
+    die "QMP query-block-jobs returned an error"
+  fi
+  while IFS=$'\t' read -r job status; do
     [[ -n "$job" ]] || continue
     any=1
-    echo "Dismissing job: $job"
-    set +e
-    job_dismiss "$job"
-    rc=$?
-    set -e
-    case "$rc" in
-      0) ok "dismissed" ;;
-      2) warn "not found" ;;
-      *) die "QMP job-dismiss timed out or failed for $job" ;;
+    case "$status" in
+      concluded)
+        echo "Dismissing concluded job: $job"
+        set +e
+        job_dismiss "$job"
+        rc=$?
+        set -e
+        case "$rc" in
+          0) ok "dismissed: $job"; dismissed=1 ;;
+          2) warn "QMP job-dismiss returned an error for $job; it may already be dismissed" ;;
+          *) die "QMP job-dismiss timed out or failed for $job" ;;
+        esac
+        ;;
+      running|created|paused|ready|standby|waiting|pending|aborting|unknown|*)
+        warn "Job $job is status=${status:-unknown}; not dismissing non-concluded block jobs."
+        ;;
     esac
-  done < <(printf '%s\n' "$out" | block_job_ids_from_json)
+  done < <(printf '%s\n' "$out" | block_jobs_table_from_json)
   (( any )) || echo "No jobs to dismiss"
+  (( dismissed )) || [[ "$any" == "0" ]] || warn "No concluded jobs were dismissed."
 }
 
 backup_job(){
@@ -1422,6 +1458,8 @@ status(){
 }
 
 final_cutover_run(){
+  load_config
+  cutover_check || die "Cutover check failed. Refusing to suspend source VM."
   virsh suspend "$VM_NAME" || die "virsh suspend failed"
   wait_vm_paused
   backup_job incremental final
@@ -1451,6 +1489,8 @@ cleanup(){
 
 stop_source_run(){
   load_config
+  state_sync_identity
+  require_final_completed
   if ! block_jobs_empty; then
     block_jobs_json
     die "Refusing to stop source VM while a block job is still present"
@@ -1499,6 +1539,40 @@ migration_block_jobs_summary(){
   return 1
 }
 
+state_file_has_progress(){
+  local file="$1" key val
+  for key in FULL_STARTED FULL_COMPLETED FINAL_COMPLETED SOURCE_STOPPED; do
+    val="$(state_get_from_file "$file" "$key")"
+    [[ "$val" == "1" ]] && return 0
+  done
+  return 1
+}
+
+state_file_progress_summary(){
+  local file="$1" key val
+  state_file_has_progress "$file" || return 1
+  printf '%s\n' "$file"
+  for key in FULL_STARTED FULL_COMPLETED FINAL_COMPLETED SOURCE_STOPPED; do
+    val="$(state_get_from_file "$file" "$key")"
+    printf '  %s=%s\n' "$key" "${val:-unset}"
+  done
+}
+
+state_reset_migration_values_for_vm(){
+  local vm="$1" file
+  file="$(state_file_for_vm "$vm")"
+  state_write_file "$file" VM_NAME "$vm"
+  state_write_file "$file" FULL_STARTED 0
+  state_write_file "$file" FULL_STARTED_AT ""
+  state_write_file "$file" FULL_JOB_ID ""
+  state_write_file "$file" FULL_COMPLETED 0
+  state_write_file "$file" FULL_COMPLETED_AT ""
+  state_write_file "$file" FINAL_COMPLETED 0
+  state_write_file "$file" FINAL_COMPLETED_AT ""
+  state_write_file "$file" SOURCE_STOPPED 0
+  state_write_file "$file" SOURCE_STOPPED_AT ""
+}
+
 migration_state_files_for_other_vm(){
   local vm="$1" wanted dir f base found=0
   wanted=".vmigrate-state-$(sanitize_name "$vm")"
@@ -1507,21 +1581,31 @@ migration_state_files_for_other_vm(){
   for f in "$dir"/.vmigrate-state-*; do
     base="${f##*/}"
     [[ "$base" == "$wanted" ]] && continue
-    printf '%s\n' "$f"
-    found=1
+    if state_file_progress_summary "$f"; then
+      found=1
+    fi
   done
   shopt -u nullglob
   (( found ))
 }
 
+migration_state_file_for_same_vm(){
+  local vm="$1" file
+  file="$(state_file_for_vm "$vm")"
+  [[ -f "$file" ]] || return 1
+  state_file_progress_summary "$file"
+}
+
 create_preparation_guard(){
-  local vm="$1" tunnels jobs states found=0
+  local vm="$1" tunnels jobs same_state states found=0 cleanup_needed=0
   tunnels="$(migration_active_tunnels || true)"
   jobs="$(migration_block_jobs_summary || true)"
+  same_state="$(migration_state_file_for_same_vm "$vm" || true)"
   states="$(migration_state_files_for_other_vm "$vm" || true)"
 
-  [[ -n "$tunnels" ]] && found=1
-  [[ -n "$jobs" ]] && found=1
+  [[ -n "$tunnels" ]] && found=1 && cleanup_needed=1
+  [[ -n "$jobs" ]] && found=1 && cleanup_needed=1
+  [[ -n "$same_state" ]] && found=1
   [[ -n "$states" ]] && found=1
   (( found )) || return 0
 
@@ -1539,27 +1623,58 @@ EOF
   if [[ -n "$jobs" ]]; then
     cat <<EOF
 
-Active qemu block job(s):
+QEMU block job(s) from the current config:
 $jobs
+EOF
+  fi
+  if [[ -n "$same_state" ]]; then
+    cat <<EOF
+
+Stale vmigrate state for this VM:
+$same_state
 EOF
   fi
   if [[ -n "$states" ]]; then
     cat <<EOF
 
-State file(s) for another VM:
+Stale vmigrate state file(s) for other VM(s):
 $states
 EOF
   fi
 
-  echo
-  echo "A previous migration session appears to exist."
-  if ! ask_yes_default "Clean migration artifacts and continue?"; then
-    die "Aborted"
+  if [[ -n "$same_state" ]]; then
+    echo
+    echo "Starting a new migration for $vm requires resetting only the vmigrate state values above."
+    ask_exact "Reset state values for $vm and continue? Type RESET:" "RESET" || die "Aborted"
+    state_reset_migration_values_for_vm "$vm"
+    ok "Reset vmigrate state values only: $(state_file_for_vm "$vm")"
   fi
 
-  [[ -f "$CONFIG_FILE" ]] || die "Cannot clean migration artifacts because config is missing: $CONFIG_FILE"
-  tunnel_stop || warn "No local tunnel stopped or tunnel-stop failed."
-  jobs_dismiss_all
+  if [[ -n "$states" ]]; then
+    echo
+    echo "Other VM state files shown above were not modified."
+    ask_exact "Leave those state files untouched and continue with $vm? Type CONTINUE:" "CONTINUE" || die "Aborted"
+  fi
+
+  if (( cleanup_needed )); then
+    echo
+    echo "Only local tunnel stop and concluded block-job dismiss will be attempted. State files, disks, LVs, VM definitions, and storage are not removed."
+    if ! ask_yes_default "Attempt local tunnel/job cleanup and continue?"; then
+      die "Aborted"
+    fi
+    if [[ -n "$tunnels" ]]; then
+      if [[ -f "$CONFIG_FILE" ]]; then
+        tunnel_stop || warn "No local tunnel stopped or tunnel-stop failed."
+      else
+        warn "Config is missing, so local tunnel cleanup was not attempted: $CONFIG_FILE"
+      fi
+    fi
+    if [[ -n "$jobs" ]]; then
+      [[ -f "$CONFIG_FILE" ]] || die "Cannot inspect block jobs because config is missing: $CONFIG_FILE"
+      jobs_dismiss_all
+    fi
+    ok "Local tunnel/job cleanup attempt completed"
+  fi
 }
 
 create_workflow(){
@@ -1661,7 +1776,6 @@ Source VM is still running.
 EOF
   fi
 
-  cutover_check
   final_cutover_run
   report
 
@@ -1676,6 +1790,8 @@ EOF
   else
     cat <<EOF
 Source VM was not stopped.
+The source VM is suspended after final cutover, not running.
+Do not resume it unless you are intentionally rolling back.
 You can stop later:
   ./vmigrate stop-source
 EOF

@@ -265,11 +265,24 @@ status(){
 
 export_disk(){
   load_config; need qemu-nbd; need ss
+  local qm_out target_status
   [[ -b "$TARGET_DISK" || -f "$TARGET_DISK" ]] || die "Target disk not found: $TARGET_DISK"
-  if qm status "$TARGET_ID" >/dev/null 2>&1; then
-    qm stop "$TARGET_ID" >/dev/null 2>&1 || true
+  if command -v qm >/dev/null 2>&1; then
+    if qm_out="$(qm status "$TARGET_ID" 2>/dev/null)"; then
+      target_status="$(printf '%s\n' "$qm_out" | awk -F': ' '$1=="status" {print $2; exit}')"
+      if [[ "$target_status" == "running" ]]; then
+        if [[ "${VMIGRATE_ALLOW_STOP_TARGET:-0}" == "1" ]]; then
+          warn "VMIGRATE_ALLOW_STOP_TARGET=1 set; stopping running target VM $TARGET_ID before export"
+          qm stop "$TARGET_ID" || die "Failed to stop running target VM $TARGET_ID"
+        else
+          die "Target VM $TARGET_ID is running. Refusing to export its disk. Stop it manually or set VMIGRATE_ALLOW_STOP_TARGET=1 to allow vmigrate-agent export to stop it."
+        fi
+      fi
+    else
+      warn "Target ID $TARGET_ID not found by qm status; continuing with disk export only"
+    fi
   else
-    warn "Target ID $TARGET_ID not found by qm status; continuing with disk export only"
+    warn "qm command not found; continuing with disk export only"
   fi
   if port_in_use; then
     die "NBD port already in use: 127.0.0.1:${NBD_PORT}"
