@@ -50,6 +50,8 @@ Usage:
   ./vmigrate wait-inc
   ./vmigrate jobs
   ./vmigrate job-dismiss JOB_ID
+  ./vmigrate job-cancel JOB_ID
+  ./vmigrate job-cancel-force JOB_ID
   ./vmigrate jobs-dismiss-all
   ./vmigrate cutover-check
   ./vmigrate check-paused
@@ -133,15 +135,16 @@ next_hint(){
 }
 
 start_log(){
-  local vm="${1:-unknown}" log_dir was_tty=0
+  local vm="${1:-unknown}" log_dir safe_vm was_tty=0
   [[ "${VMIGRATE_LOG:-1}" == "0" ]] && return 0
   (( LOG_STARTED )) && return 0
 
   [[ -t 1 ]] && was_tty=1
 
-  log_dir="$(config_dir)"
+  safe_vm="$(sanitize_name "$vm")"
+  log_dir="${VMIGRATE_LOG_DIR:-$(config_dir)/logs}/${safe_vm}"
   mkdir -p "$log_dir"
-  LOG_FILE="${log_dir}/vmigrate-$(sanitize_name "$vm")-$(date '+%Y%m%d-%H%M%S').log"
+  LOG_FILE="${log_dir}/vmigrate-$(date '+%Y%m%d-%H%M%S').log"
   LOG_STARTED=1
 
   exec > >(tee -a "$LOG_FILE") 2>&1
@@ -1233,6 +1236,52 @@ job_dismiss_cmd(){
   ok "dismissed: $job"
 }
 
+job_cancel_qmp(){
+  local job="$1" force="${2:-0}" out json
+  if [[ "$force" == "1" ]]; then
+    json='{"execute":"job-cancel","arguments":{"id":"'"$job"'","force":true}}'
+  else
+    json='{"execute":"job-cancel","arguments":{"id":"'"$job"'"}}'
+  fi
+
+  if ! out="$(qmp "$json" 2>/dev/null)"; then
+    die "QMP job-cancel timed out or failed"
+  fi
+
+  printf '%s\n' "$out"
+
+  if printf '%s\n' "$out" | grep -q '"error"'; then
+    die "QMP job-cancel returned an error for job: $job"
+  fi
+}
+
+job_cancel_cmd(){
+  load_config
+  local job="${1:-}"
+  [[ -n "$job" ]] || die "Usage: ./vmigrate job-cancel JOB_ID"
+  warn "This asks QEMU to cancel block job '$job'. Destination data may be incomplete."
+  confirm "Cancel job $job now?" || die "Aborted"
+  job_cancel_qmp "$job" 0
+  ok "Cancel requested for job: $job"
+  echo "Run next:"
+  echo "  ./vmigrate jobs"
+  echo "  ./vmigrate jobs-dismiss-all"
+}
+
+job_cancel_force_cmd(){
+  load_config
+  local job="${1:-}"
+  [[ -n "$job" ]] || die "Usage: ./vmigrate job-cancel-force JOB_ID"
+  warn "FORCE cancel may leave the destination disk incomplete or unusable."
+  warn "Use this only to abort a stuck/failed migration job, not during a healthy production cutover."
+  ask_exact "Force-cancel job $job? Type CANCEL:" "CANCEL" || die "Aborted"
+  job_cancel_qmp "$job" 1
+  ok "Force cancel requested for job: $job"
+  echo "Run next:"
+  echo "  ./vmigrate jobs"
+  echo "  ./vmigrate jobs-dismiss-all"
+}
+
 jobs_dismiss_all(){
   load_config
   local out job status rc any=0 dismissed=0
@@ -1935,6 +1984,8 @@ case "$cmd" in
   wait-inc) wait_inc ;;
   jobs) jobs_cmd ;;
   job-dismiss) job_dismiss_cmd "${1:-}" ;;
+  job-cancel) job_cancel_cmd "${1:-}" ;;
+  job-cancel-force) job_cancel_force_cmd "${1:-}" ;;
   jobs-dismiss-all) jobs_dismiss_all ;;
   cutover-check) cutover_check ;;
   check-paused) check_paused ;;
