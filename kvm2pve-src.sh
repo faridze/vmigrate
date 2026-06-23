@@ -1467,6 +1467,7 @@ EOF
   preflight
 
   write_key BACKUP_METHOD drive-backup
+  load_config
 
   warn "Resetting any stale tunnel/export before starting."
   tunnel_stop || warn "No local tunnel stopped or tunnel-stop failed."
