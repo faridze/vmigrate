@@ -25,6 +25,7 @@ Usage:
   ./kvm2pve-src.sh show
   ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
   ./kvm2pve-src.sh remote-prepare VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]
+  ./kvm2pve-src.sh migrate VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]
   ./kvm2pve-src.sh remote-export
   ./kvm2pve-src.sh remote-dst-status
   ./kvm2pve-src.sh remote-dst-close
@@ -67,6 +68,11 @@ EOF
 
 ask(){ local var="$1" prompt="$2" def="${3:-}" val; read -r -p "$prompt${def:+ [$def]}: " val; printf -v "$var" '%s' "${val:-$def}"; }
 confirm(){ local prompt="$1" ans; read -r -p "$prompt [yes/no]: " ans; [[ "$ans" == "yes" ]]; }
+ask_exact(){
+  local prompt="$1" expected="$2" ans
+  read -r -p "$prompt " ans
+  [[ "$ans" == "$expected" ]]
+}
 
 sanitize_name(){ printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '-'; }
 default_bitmap(){ printf 'kvm2pve-bitmap-%s' "$(sanitize_name "$1")"; }
@@ -1388,11 +1394,7 @@ status(){
   fi
 }
 
-final_cutover(){
-  load_config
-  require_full_completed
-  warn "Before final cutover, lock customer/Virtualizor panel controls."
-  confirm "Suspend source VM and run FINAL incremental now?" || die "Aborted"
+final_cutover_run(){
   virsh suspend "$VM_NAME" || die "virsh suspend failed"
   wait_vm_paused
   backup_job incremental final
@@ -1401,6 +1403,14 @@ final_cutover(){
   state_write FINAL_COMPLETED 1
   state_write FINAL_COMPLETED_AT "$(now_ts)"
   ok "Final incremental completed"
+}
+
+final_cutover(){
+  load_config
+  require_full_completed
+  warn "Before final cutover, lock customer/Virtualizor panel controls."
+  confirm "Suspend source VM and run FINAL incremental now?" || die "Aborted"
+  final_cutover_run
 }
 
 cleanup(){
@@ -1412,19 +1422,138 @@ cleanup(){
   ok "Source cleanup attempted"
 }
 
-stop_source(){
+stop_source_run(){
   load_config
-  warn "This stops the source VM. Use only after final incremental completed."
   if ! block_jobs_empty; then
     block_jobs_json
     die "Refusing to stop source VM while a block job is still present"
   fi
-  confirm "Destroy/stop source VM $VM_NAME now?" || die "Aborted"
   virsh destroy "$VM_NAME"
   state_sync_identity
   state_write SOURCE_STOPPED 1
   state_write SOURCE_STOPPED_AT "$(now_ts)"
   ok "Source VM stopped and state updated"
+}
+
+stop_source(){
+  load_config
+  warn "This stops the source VM. Use only after final incremental completed."
+  confirm "Destroy/stop source VM $VM_NAME now?" || die "Aborted"
+  stop_source_run
+}
+
+
+migrate_workflow(){
+  local vm="$1" pve_vmid="$2" pve_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}"
+
+  [[ -n "$vm" && -n "$pve_vmid" && -n "$pve_host" ]] || die "Usage: ./kvm2pve-src.sh migrate VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]"
+  case "$pve_vmid" in *[!0-9]*|'') die "Destination Proxmox VMID must be numeric" ;; esac
+  case "$ssh_port" in *[!0-9]*|'') die "SSH port must be numeric" ;; esac
+  [[ -n "$ssh_user" ]] || die "SSH user must not be empty"
+
+  cat <<EOF
+kvm2pve migration
+-----------------
+Source VM        : $vm
+Destination VMID : $pve_vmid
+Destination Host : $pve_host
+SSH              : ${ssh_user}@${pve_host}:${ssh_port}
+Backup method    : drive-backup
+EOF
+
+  ask_exact "Continue with preparation? Type YES:" "YES" || die "Aborted"
+
+  remote_prepare "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user"
+  preflight
+
+  write_key BACKUP_METHOD drive-backup
+
+  warn "Resetting any stale tunnel/export before starting."
+  tunnel_stop || warn "No local tunnel stopped or tunnel-stop failed."
+  remote_dst_close || warn "No remote NBD export closed or remote close failed."
+
+  remote_export
+  start_tunnel
+  tunnel_check || die "NBD metadata check failed. Fix tunnel/export before migration."
+
+  create_bitmap
+  check_bitmap
+  report
+
+  cat <<EOF
+
+Preparation completed.
+Ready to start FULL sync.
+EOF
+  if ! ask_exact "Start FULL sync now? Type FULL:" "FULL"; then
+    cat <<EOF
+Full sync not started.
+Resume manually:
+  ./kvm2pve-src.sh full
+  ./kvm2pve-src.sh wait-full
+EOF
+    return 0
+  fi
+
+  full_sync
+  wait_full
+  report
+
+  cat <<EOF
+
+FULL sync completed.
+Cutover will suspend the source VM and run final incremental.
+Lock customer/Virtualizor controls before continuing.
+EOF
+  if ! ask_exact "Start CUTOVER now? Type CUTOVER:" "CUTOVER"; then
+    cat <<EOF
+Cutover not started.
+Resume manually:
+  ./kvm2pve-src.sh cutover-check
+  ./kvm2pve-src.sh final
+  ./kvm2pve-src.sh report
+EOF
+    return 0
+  fi
+
+  cutover_check
+  final_cutover_run
+  report
+
+  cat <<EOF
+
+Cutover completed.
+Destination VM can now be booted from Proxmox.
+Source VM still exists unless stopped.
+EOF
+  if ask_exact "Stop source VM now? Type STOP:" "STOP"; then
+    stop_source_run
+  else
+    cat <<EOF
+Source VM was not stopped.
+You can stop later:
+  ./kvm2pve-src.sh stop-source
+EOF
+  fi
+
+  if ask_exact "Close destination NBD export and local tunnel now? Type CLEAN:" "CLEAN"; then
+    tunnel_stop || warn "Tunnel stop failed or no tunnel found."
+    remote_dst_close || warn "Remote NBD close failed or no export found."
+    ok "Cleanup completed"
+  else
+    cat <<EOF
+Cleanup skipped.
+You can clean later:
+  ./kvm2pve-src.sh tunnel-stop
+  ./kvm2pve-src.sh remote-dst-close
+EOF
+  fi
+
+  cat <<EOF
+Migration workflow finished.
+Review:
+  ./kvm2pve-src.sh report
+EOF
 }
 
 cmd="${1:-}"; shift || true
@@ -1434,6 +1563,7 @@ case "$cmd" in
   show) show_config ;;
   apply-handoff) apply_handoff "${1:-}" ;;
   remote-prepare|migrate-prepare) remote_prepare "${1:-}" "${3:-}" "${2:-}" "${4:-22}" "${5:-root}" ;;
+  migrate) migrate_workflow "${1:-}" "${2:-}" "${3:-}" "${4:-22}" "${5:-root}" ;;
   remote-export) remote_export ;;
   remote-dst-status) remote_dst_status ;;
   remote-dst-close) remote_dst_close ;;

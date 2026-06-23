@@ -82,6 +82,32 @@ legacy/kvm2pve-ui.sh           Legacy/experimental terminal UI
 examples/kvm2pve.env.example   Example shared config
 ```
 
+## One-Command Interactive Migration
+
+Use `migrate` for the supported CLI replacement for the abandoned UI:
+
+```bash
+./kvm2pve-src.sh migrate v2698 2697 45.89.237.162 2112 root
+```
+
+Argument order is:
+
+```text
+VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]
+```
+
+The interactive workflow runs `remote-prepare`, `preflight`, stale tunnel/export
+reset, `remote-export`, `tunnel`, `tunnel-check`, bitmap creation, and bitmap
+verification. It then asks before starting FULL sync, shows `wait-full` progress,
+asks before CUTOVER, asks before stopping the source VM, and asks before cleanup.
+
+A `qemu-io` read sample warning from `tunnel-check` does not block migration when
+NBD metadata is reachable. The real validation is that FULL sync starts and
+`wait-full` shows progress.
+
+The workflow never deletes disks, never undefines VMs, never wipes filesystems,
+and never removes LVs or storage.
+
 ## Supported Remote CLI Workflow
 
 Run from the SOURCE host only. `remote-prepare` writes the remote connection
