@@ -77,7 +77,7 @@ The destination VM must not be running during migration.
 
 ```text
 vmigrate                 Run on source Virtualizor/KVM host
-vmigrate-agent                 Run on destination Proxmox host
+vmigrate-agent                 Run on destination target host
 legacy/vmigrate-ui.sh           Legacy/experimental terminal UI
 examples/vmigrate.env.example   Example shared config
 ```
@@ -248,7 +248,7 @@ tunnel/export path:
 
 ## Alternative Manual Handoff Workflow
 
-Use this path when the source host cannot SSH to the destination Proxmox host.
+Use this path when the source host cannot SSH to the destination target host.
 
 Destination:
 
@@ -349,7 +349,7 @@ status
 ## Safe Production Sequence
 
 ```text
-1. Prepare destination VM disk on Proxmox
+1. Prepare destination VM disk on the target platform
 2. Run source discovery and confirm config
 3. Apply destination handoff or run remote-prepare from source
 4. Choose/confirm backup method with set-backup-method

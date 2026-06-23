@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# vmigrate destination-side helper for Proxmox
+# vmigrate destination-side helper
 set -Eeuo pipefail
 
 VERSION="0.4.0"
@@ -141,12 +141,12 @@ discover_config(){
 
 Detected destination values
 ---------------------------
-Config file : $CONFIG_FILE
-Target ID   : $vmid
-VM name     : $vm_name
-Disk        : $disk
-NBD port    : $nbd_port
-NBD export  : $nbd_export
+Config file    : $CONFIG_FILE
+Target ID      : $vmid
+VM name        : $vm_name
+Disk           : $disk
+NBD port       : $nbd_port
+NBD export     : $nbd_export
 EOF
 
   if [[ "$yes_mode" == "1" ]] || confirm "Write these values to destination config?"; then
@@ -167,8 +167,8 @@ EOF
 show_config(){
   load_config
   cat <<EOF
-Destination Proxmox
--------------------
+Destination target
+------------------
 VM name/export : $VM_NAME
 Target ID      : $TARGET_ID
 Disk           : $TARGET_DISK
@@ -203,11 +203,11 @@ quick_start(){
 
 Target quick summary
 -------------------------
-Config file : $CONFIG_FILE
-Target ID   : $TARGET_ID
-Disk        : $TARGET_DISK
-NBD port    : $NBD_PORT
-NBD export  : $NBD_EXPORT
+Config file    : $CONFIG_FILE
+Target ID      : $TARGET_ID
+Disk           : $TARGET_DISK
+NBD port       : $NBD_PORT
+NBD export     : $NBD_EXPORT
 
 Handoff token
 -------------

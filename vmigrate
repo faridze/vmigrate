@@ -258,8 +258,8 @@ QEMU node      : ${QEMU_NODE:-not set}
 Bitmap         : $BITMAP
 Target node    : $TARGET_NODE
 Target         : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}
-Target ID   : $TARGET_ID
-Target disk   : $TARGET_DISK
+Target ID      : $TARGET_ID
+Target disk    : $TARGET_DISK
 NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 Tunnel mode    : $TUNNEL_MODE
 Backup method  : ${BACKUP_METHOD:-drive-backup}
@@ -353,7 +353,7 @@ next_steps(){
     cat <<EOF
 Current state
 -------------
-Config file : missing
+Config file    : missing
 
 Next (recommended):
 ./vmigrate quick HANDOFF_TOKEN
@@ -389,7 +389,7 @@ Backup method     : $method
 Effective method  : $effective
 Source discovered : $(status_word source_discovered)
 Handoff applied   : $(status_word handoff_applied)
-Proxmox host set  : $(status_word target_host_set) ($target_host)
+Target host set   : $(status_word target_host_set) ($target_host)
 Tunnel healthy    : $tunnel_ok
 Bitmap present    : $bitmap_ok
 FULL_STARTED      : $full_started
@@ -820,8 +820,8 @@ Disk size           : $size
 Bitmap              : $BITMAP
 Target node         : $TARGET_NODE
 Target              : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}
-Target ID        : $TARGET_ID
-Target disk        : $TARGET_DISK
+Target ID      : $TARGET_ID
+Target disk    : $TARGET_DISK
 NBD port/export     : ${NBD_PORT}/${NBD_EXPORT}
 EOF
   if (( assume_yes )) || confirm "Write these detected values to config and continue with this VM?"; then
@@ -1268,8 +1268,8 @@ Migration report
 ----------------
 VM name              : $VM_NAME
 Source disk          : ${SRC_DISK:-not set}
-Target ID         : $TARGET_ID
-Target disk     : $TARGET_DISK
+Target ID           : $TARGET_ID
+Target disk         : $TARGET_DISK
 Bitmap               : $BITMAP
 Target node          : $TARGET_NODE
 Backup method        : ${BACKUP_METHOD:-drive-backup}
@@ -1574,16 +1574,14 @@ create_workflow(){
 vmigrate migration
 -----------------
 Source VM        : $vm
-Target ID : $target_id
-Destination Host : $target_host
+Target ID        : $target_id
+Target host      : $target_host
 SSH              : ${ssh_user}@${target_host}:${ssh_port}
 Backup method    : drive-backup
 EOF
 
   create_preparation_guard "$vm"
   ask_exact "Continue with preparation? Type YES:" "YES" || die "Aborted"
-
-  # remote_prepare internal signature is: VM_NAME TARGET_HOST TARGET_ID SSH_PORT SSH_USER
   remote_prepare "$vm" "$target_host" "$target_id" "$ssh_port" "$ssh_user"
   preflight
 
@@ -1670,10 +1668,10 @@ EOF
   cat <<EOF
 
 Cutover completed.
-Destination VM can now be booted from Proxmox.
+Destination VM is ready to boot.
 Source VM still exists unless stopped.
 EOF
-  if ask_exact "Stop source VM now? Type STOP:" "STOP"; then
+  if ask_exact "Stop source VM now (irreversible for production traffic)? Type STOP:" "STOP"; then
     stop_source_run
   else
     cat <<EOF
