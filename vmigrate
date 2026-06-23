@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# kvm2pve source-side helper
+# vmigrate source-side helper
 set -Eeuo pipefail
 
 VERSION="0.4.3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
+CONFIG_FILE="${VMIGRATE_CONFIG:-${SCRIPT_DIR}/vmigrate.env}"
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
 if [[ -n "${NO_COLOR:-}" ]]; then
@@ -17,52 +17,52 @@ die(){ echo "${RED}ERROR${NC} $*" >&2; exit 1; }
 need(){ command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"; }
 
 usage(){ cat <<EOF
-kvm2pve-src.sh v${VERSION}
+vmigrate v${VERSION}
 
 Usage:
-  ./kvm2pve-src.sh discover [VM_NAME] [--yes]
-  ./kvm2pve-src.sh init
-  ./kvm2pve-src.sh show
-  ./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN
-  ./kvm2pve-src.sh remote-prepare VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]
-  ./kvm2pve-src.sh migrate VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]
-  ./kvm2pve-src.sh remote-export
-  ./kvm2pve-src.sh remote-dst-status
-  ./kvm2pve-src.sh remote-dst-close
-  ./kvm2pve-src.sh quick [HANDOFF_TOKEN]
-  ./kvm2pve-src.sh quick [VM_NAME] [HANDOFF_TOKEN]
-  ./kvm2pve-src.sh next
-  ./kvm2pve-src.sh preflight
-  ./kvm2pve-src.sh tunnel
-  ./kvm2pve-src.sh tunnel-stop
-  ./kvm2pve-src.sh tunnel-restart
-  ./kvm2pve-src.sh tunnel-status
-  ./kvm2pve-src.sh tunnel-check
-  ./kvm2pve-src.sh attach-target
-  ./kvm2pve-src.sh check-target
-  ./kvm2pve-src.sh bitmap
-  ./kvm2pve-src.sh check-bitmap
-  ./kvm2pve-src.sh full
-  ./kvm2pve-src.sh wait-full
-  ./kvm2pve-src.sh mark-full
-  ./kvm2pve-src.sh set-backup-method
-  ./kvm2pve-src.sh incremental
-  ./kvm2pve-src.sh wait-inc
-  ./kvm2pve-src.sh jobs
-  ./kvm2pve-src.sh job-dismiss JOB_ID
-  ./kvm2pve-src.sh jobs-dismiss-all
-  ./kvm2pve-src.sh cutover-check
-  ./kvm2pve-src.sh check-paused
-  ./kvm2pve-src.sh final
-  ./kvm2pve-src.sh watch
-  ./kvm2pve-src.sh status
-  ./kvm2pve-src.sh report
-  ./kvm2pve-src.sh verify-sample
-  ./kvm2pve-src.sh cleanup
-  ./kvm2pve-src.sh stop-source
+  ./vmigrate discover [VM_NAME] [--yes]
+  ./vmigrate init
+  ./vmigrate show
+  ./vmigrate apply-handoff HANDOFF_TOKEN
+  ./vmigrate remote-prepare VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
+  ./vmigrate create VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
+  ./vmigrate remote-export
+  ./vmigrate remote-dst-status
+  ./vmigrate remote-dst-close
+  ./vmigrate quick [HANDOFF_TOKEN]
+  ./vmigrate quick [VM_NAME] [HANDOFF_TOKEN]
+  ./vmigrate next
+  ./vmigrate doctor
+  ./vmigrate tunnel
+  ./vmigrate tunnel-stop
+  ./vmigrate tunnel-restart
+  ./vmigrate tunnel-status
+  ./vmigrate tunnel-check
+  ./vmigrate attach-target
+  ./vmigrate check-target
+  ./vmigrate bitmap
+  ./vmigrate check-bitmap
+  ./vmigrate full
+  ./vmigrate wait-full
+  ./vmigrate mark-full
+  ./vmigrate set-backup-method
+  ./vmigrate incremental
+  ./vmigrate wait-inc
+  ./vmigrate jobs
+  ./vmigrate job-dismiss JOB_ID
+  ./vmigrate jobs-dismiss-all
+  ./vmigrate cutover-check
+  ./vmigrate check-paused
+  ./vmigrate final
+  ./vmigrate watch
+  ./vmigrate status
+  ./vmigrate report
+  ./vmigrate verify-sample
+  ./vmigrate cleanup
+  ./vmigrate stop-source
 
 Recommended first run:
-  ./kvm2pve-src.sh quick HANDOFF_TOKEN
+  ./vmigrate quick HANDOFF_TOKEN
 EOF
 }
 
@@ -86,21 +86,21 @@ ask_yes_default(){
 }
 
 sanitize_name(){ printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '-'; }
-default_bitmap(){ printf 'kvm2pve-bitmap-%s' "$(sanitize_name "$1")"; }
-default_target_node(){ printf 'kvm2pve-target-%s' "$(sanitize_name "$1")"; }
+default_bitmap(){ printf 'vmigrate-bitmap-%s' "$(sanitize_name "$1")"; }
+default_target_node(){ printf 'vmigrate-target-%s' "$(sanitize_name "$1")"; }
 
 load_config(){
-  [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE. Run: ./kvm2pve-src.sh discover VM_NAME"
+  [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE. Run: ./vmigrate discover VM_NAME"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  : "${VM_NAME:?}"; : "${PVE_HOST:?}"; : "${PVE_SSH_USER:=root}"; : "${PVE_SSH_PORT:=22}"; : "${PVE_VMID:?}"; : "${PVE_DISK:?}"
+  : "${VM_NAME:?}"; : "${TARGET_HOST:?}"; : "${TARGET_SSH_USER:=root}"; : "${TARGET_SSH_PORT:=22}"; : "${TARGET_ID:?}"; : "${TARGET_DISK:?}"
   SRC_DISK="${SRC_DISK:-}"
   QEMU_DEVICE="${QEMU_DEVICE:-}"
   QEMU_NODE="${QEMU_NODE:-}"
   BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"
   TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"
   NBD_PORT="${NBD_PORT:-10809}"
-  NBD_EXPORT="${NBD_EXPORT:-vm-${PVE_VMID}}"
+  NBD_EXPORT="${NBD_EXPORT:-vm-${TARGET_ID}}"
   TUNNEL_MODE="${TUNNEL_MODE:-autossh}"
   AUTOSSH_MONITOR_PORT="${AUTOSSH_MONITOR_PORT:-20000}"
   BACKUP_METHOD="${BACKUP_METHOD:-drive-backup}"
@@ -124,7 +124,7 @@ state_file(){
   local vm
   vm="${VM_NAME:-$(get_conf VM_NAME)}"
   [[ -n "$vm" ]] || vm="unknown"
-  printf '%s/.kvm2pve-state-%s' "$(config_dir)" "$(sanitize_name "$vm")"
+  printf '%s/.vmigrate-state-%s' "$(config_dir)" "$(sanitize_name "$vm")"
 }
 state_get(){ local key="$1" file; file="$(state_file)"; [[ -f "$file" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$file"; }
 state_write(){
@@ -139,7 +139,7 @@ state_write(){
 state_sync_identity(){
   state_write VM_NAME "${VM_NAME:-}"
   state_write SRC_DISK "${SRC_DISK:-}"
-  state_write PVE_DISK "${PVE_DISK:-}"
+  state_write TARGET_DISK "${TARGET_DISK:-}"
   [[ -n "$(state_get FULL_STARTED)" ]] || state_write FULL_STARTED 0
   [[ -n "$(state_get FULL_STARTED_AT)" ]] || state_write FULL_STARTED_AT ""
   [[ -n "$(state_get FULL_JOB_ID)" ]] || state_write FULL_JOB_ID ""
@@ -163,12 +163,12 @@ mark_full_completed(){
 }
 
 init_config(){
-  local vm pve_host pve_vmid pve_disk ssh_port src_disk
+  local vm target_host target_id target_disk ssh_port src_disk
   ask vm "Source VM name" "kvm3023"
-  ask pve_host "Proxmox host/IP" "CHANGE_ME"
-  ask ssh_port "Proxmox SSH port" "22"
-  ask pve_vmid "Destination Proxmox VMID" "2672"
-  ask pve_disk "Destination disk path" "/dev/pve/vm-${pve_vmid}-disk-0"
+  ask target_host "Target host/IP" "CHANGE_ME"
+  ask ssh_port "Target SSH port" "22"
+  ask target_id "Target ID" "2672"
+  ask target_disk "Target disk path" "/dev/pve/vm-${target_id}-disk-0"
   ask src_disk "Source disk path, empty=auto-discover" ""
   cat > "$CONFIG_FILE" <<EOF
 VM_NAME=$vm
@@ -177,13 +177,13 @@ QEMU_DEVICE=
 QEMU_NODE=
 BITMAP=$(default_bitmap "$vm")
 TARGET_NODE=$(default_target_node "$vm")
-PVE_HOST=$pve_host
-PVE_SSH_USER=root
-PVE_SSH_PORT=$ssh_port
-PVE_VMID=$pve_vmid
-PVE_DISK=$pve_disk
+TARGET_HOST=$target_host
+TARGET_SSH_USER=root
+TARGET_SSH_PORT=$ssh_port
+TARGET_ID=$target_id
+TARGET_DISK=$target_disk
 NBD_PORT=10809
-NBD_EXPORT=vm-${pve_vmid}
+NBD_EXPORT=vm-${target_id}
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
 BACKUP_METHOD=drive-backup
@@ -193,7 +193,7 @@ EOF
 }
 
 ensure_base_config(){
-  local vm_arg="${1:-}" vm old_vm pve_host pve_vmid pve_disk ssh_port
+  local vm_arg="${1:-}" vm old_vm target_host target_id target_disk ssh_port
   if [[ -f "$CONFIG_FILE" ]]; then
     old_vm="$(get_conf VM_NAME)"
     vm="${vm_arg:-$old_vm}"
@@ -210,11 +210,11 @@ ensure_base_config(){
     else
       [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP "$(default_bitmap "$vm")"
       [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE "$(default_target_node "$vm")"
-      [[ -n "$(get_conf NBD_EXPORT)" ]] || write_key NBD_EXPORT "vm-$(get_conf PVE_VMID)"
+      [[ -n "$(get_conf NBD_EXPORT)" ]] || write_key NBD_EXPORT "vm-$(get_conf TARGET_ID)"
     fi
 
-    [[ -n "$(get_conf PVE_SSH_USER)" ]] || write_key PVE_SSH_USER root
-    [[ -n "$(get_conf PVE_SSH_PORT)" ]] || write_key PVE_SSH_PORT 22
+    [[ -n "$(get_conf TARGET_SSH_USER)" ]] || write_key TARGET_SSH_USER root
+    [[ -n "$(get_conf TARGET_SSH_PORT)" ]] || write_key TARGET_SSH_PORT 22
     [[ -n "$(get_conf NBD_PORT)" ]] || write_key NBD_PORT 10809
     [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
     [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
@@ -222,10 +222,10 @@ ensure_base_config(){
   else
     vm="$vm_arg"
     [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
-    ask pve_host "Proxmox host/IP" "CHANGE_ME"
-    ask ssh_port "Proxmox SSH port" "22"
-    ask pve_vmid "Destination Proxmox VMID" "2672"
-    ask pve_disk "Destination disk path" "/dev/pve/vm-${pve_vmid}-disk-0"
+    ask target_host "Target host/IP" "CHANGE_ME"
+    ask ssh_port "Target SSH port" "22"
+    ask target_id "Target ID" "2672"
+    ask target_disk "Target disk path" "/dev/pve/vm-${target_id}-disk-0"
     cat > "$CONFIG_FILE" <<EOF
 VM_NAME=$vm
 SRC_DISK=
@@ -233,13 +233,13 @@ QEMU_DEVICE=
 QEMU_NODE=
 BITMAP=$(default_bitmap "$vm")
 TARGET_NODE=$(default_target_node "$vm")
-PVE_HOST=$pve_host
-PVE_SSH_USER=root
-PVE_SSH_PORT=$ssh_port
-PVE_VMID=$pve_vmid
-PVE_DISK=$pve_disk
+TARGET_HOST=$target_host
+TARGET_SSH_USER=root
+TARGET_SSH_PORT=$ssh_port
+TARGET_ID=$target_id
+TARGET_DISK=$target_disk
 NBD_PORT=10809
-NBD_EXPORT=vm-${pve_vmid}
+NBD_EXPORT=vm-${target_id}
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
 BACKUP_METHOD=drive-backup
@@ -257,9 +257,9 @@ QEMU device    : ${QEMU_DEVICE:-not set}
 QEMU node      : ${QEMU_NODE:-not set}
 Bitmap         : $BITMAP
 Target node    : $TARGET_NODE
-Proxmox        : ${PVE_SSH_USER}@${PVE_HOST}:${PVE_SSH_PORT}
-Proxmox VMID   : $PVE_VMID
-Proxmox disk   : $PVE_DISK
+Target         : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}
+Target ID   : $TARGET_ID
+Target disk   : $TARGET_DISK
 NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 Tunnel mode    : $TUNNEL_MODE
 Backup method  : ${BACKUP_METHOD:-drive-backup}
@@ -270,8 +270,8 @@ EOF
 }
 
 apply_handoff(){
-  local token="${1:-}" prefix="KVM2PVE_HANDOFF_V1:" payload decoded line key val
-  local handoff_pve_vmid="" handoff_pve_disk="" handoff_nbd_port="" handoff_nbd_export=""
+  local token="${1:-}" prefix="VMIGRATE_HANDOFF_V1:" payload decoded line key val
+  local handoff_target_id="" handoff_target_disk="" handoff_nbd_port="" handoff_nbd_export=""
 
   [[ -n "$token" ]] || die "Missing handoff token"
   [[ "$token" == "$prefix"* ]] || die "Invalid handoff token prefix"
@@ -287,8 +287,8 @@ apply_handoff(){
     key="${line%%=*}"
     val="${line#*=}"
     case "$key" in
-      PVE_VMID) handoff_pve_vmid="$val" ;;
-      PVE_DISK) handoff_pve_disk="$val" ;;
+      TARGET_ID) handoff_target_id="$val" ;;
+      TARGET_DISK) handoff_target_disk="$val" ;;
       NBD_PORT) handoff_nbd_port="$val" ;;
       NBD_EXPORT) handoff_nbd_export="$val" ;;
       *) ;;
@@ -297,21 +297,21 @@ apply_handoff(){
 $decoded
 EOF
 
-  [[ -n "$handoff_pve_vmid" ]] || die "Handoff payload missing PVE_VMID"
-  [[ -n "$handoff_pve_disk" ]] || die "Handoff payload missing PVE_DISK"
+  [[ -n "$handoff_target_id" ]] || die "Handoff payload missing TARGET_ID"
+  [[ -n "$handoff_target_disk" ]] || die "Handoff payload missing TARGET_DISK"
   [[ -n "$handoff_nbd_port" ]] || handoff_nbd_port="10809"
-  [[ -n "$handoff_nbd_export" ]] || handoff_nbd_export="vm-${handoff_pve_vmid}"
+  [[ -n "$handoff_nbd_export" ]] || handoff_nbd_export="vm-${handoff_target_id}"
 
-  write_key PVE_VMID "$handoff_pve_vmid"
-  write_key PVE_DISK "$handoff_pve_disk"
+  write_key TARGET_ID "$handoff_target_id"
+  write_key TARGET_DISK "$handoff_target_disk"
   write_key NBD_PORT "$handoff_nbd_port"
   write_key NBD_EXPORT "$handoff_nbd_export"
 
   cat <<EOF
 Applied handoff
 ---------------
-PVE_VMID=$handoff_pve_vmid
-PVE_DISK=$handoff_pve_disk
+TARGET_ID=$handoff_target_id
+TARGET_DISK=$handoff_target_disk
 NBD_PORT=$handoff_nbd_port
 NBD_EXPORT=$handoff_nbd_export
 EOF
@@ -329,25 +329,25 @@ prompt_source_vm(){
 }
 
 prompt_pve_connection(){
-  local pve_host ssh_port
+  local target_host ssh_port
 
-  pve_host="$(conf_value PVE_HOST CHANGE_ME)"
-  ask pve_host "Proxmox host/IP" "$pve_host"
-  write_key PVE_HOST "$pve_host"
+  target_host="$(conf_value TARGET_HOST CHANGE_ME)"
+  ask target_host "Target host/IP" "$target_host"
+  write_key TARGET_HOST "$target_host"
 
-  ssh_port="$(conf_value PVE_SSH_PORT 22)"
-  ask ssh_port "Proxmox SSH port" "$ssh_port"
-  write_key PVE_SSH_PORT "$ssh_port"
+  ssh_port="$(conf_value TARGET_SSH_PORT 22)"
+  ask ssh_port "Target SSH port" "$ssh_port"
+  write_key TARGET_SSH_PORT "$ssh_port"
 
-  [[ -n "$(get_conf PVE_SSH_USER)" ]] || write_key PVE_SSH_USER root
+  [[ -n "$(get_conf TARGET_SSH_USER)" ]] || write_key TARGET_SSH_USER root
 }
 
 source_discovered(){ conf_present SRC_DISK && conf_present QEMU_DEVICE && conf_present QEMU_NODE; }
-handoff_applied(){ conf_present PVE_VMID && conf_present PVE_DISK && conf_present NBD_PORT && conf_present NBD_EXPORT; }
-pve_host_set(){ local host; host="$(get_conf PVE_HOST)"; [[ -n "$host" && "$host" != "CHANGE_ME" ]]; }
+handoff_applied(){ conf_present TARGET_ID && conf_present TARGET_DISK && conf_present NBD_PORT && conf_present NBD_EXPORT; }
+target_host_set(){ local host; host="$(get_conf TARGET_HOST)"; [[ -n "$host" && "$host" != "CHANGE_ME" ]]; }
 
 next_steps(){
-  local vm pve_host method effective full_started full_completed final_completed source_stopped bitmap_ok tunnel_ok
+  local vm target_host method effective full_started full_completed final_completed source_stopped bitmap_ok tunnel_ok
 
   if [[ ! -f "$CONFIG_FILE" ]]; then
     cat <<EOF
@@ -356,20 +356,20 @@ Current state
 Config file : missing
 
 Next (recommended):
-./kvm2pve-src.sh quick HANDOFF_TOKEN
+./vmigrate quick HANDOFF_TOKEN
 EOF
     return 0
   fi
 
   vm="$(conf_value VM_NAME VM_NAME)"
-  pve_host="$(conf_value PVE_HOST CHANGE_ME)"
+  target_host="$(conf_value TARGET_HOST CHANGE_ME)"
   method="$(conf_value BACKUP_METHOD drive-backup)"
   full_started="$(state_get FULL_STARTED)"; full_started="${full_started:-0}"
   full_completed="$(state_get FULL_COMPLETED)"; full_completed="${full_completed:-0}"
   final_completed="$(state_get FINAL_COMPLETED)"; final_completed="${final_completed:-0}"
   source_stopped="$(state_get SOURCE_STOPPED)"; source_stopped="${source_stopped:-0}"
 
-  if source_discovered && handoff_applied && pve_host_set; then
+  if source_discovered && handoff_applied && target_host_set; then
     load_config
     effective="$(effective_backup_method)"
     if tunnel_health_ok >/dev/null 2>&1; then tunnel_ok="yes"; else tunnel_ok="no"; fi
@@ -389,7 +389,7 @@ Backup method     : $method
 Effective method  : $effective
 Source discovered : $(status_word source_discovered)
 Handoff applied   : $(status_word handoff_applied)
-Proxmox host set  : $(status_word pve_host_set) ($pve_host)
+Proxmox host set  : $(status_word target_host_set) ($target_host)
 Tunnel healthy    : $tunnel_ok
 Bitmap present    : $bitmap_ok
 FULL_STARTED      : $full_started
@@ -402,42 +402,42 @@ Suggested next
 EOF
 
   if ! conf_present VM_NAME; then
-    echo "./kvm2pve-src.sh discover VM_NAME"
+    echo "./vmigrate discover VM_NAME"
   elif ! source_discovered; then
-    echo "./kvm2pve-src.sh discover $vm"
+    echo "./vmigrate discover $vm"
   elif ! handoff_applied; then
-    echo "./kvm2pve-src.sh apply-handoff HANDOFF_TOKEN"
-  elif ! pve_host_set; then
-    echo "Set PVE_HOST in $CONFIG_FILE, then run: ./kvm2pve-src.sh remote-prepare or ./kvm2pve-src.sh preflight"
+    echo "./vmigrate apply-handoff HANDOFF_TOKEN"
+  elif ! target_host_set; then
+    echo "Set TARGET_HOST in $CONFIG_FILE, then run: ./vmigrate remote-prepare or ./vmigrate doctor"
   elif [[ "$tunnel_ok" != "yes" ]]; then
-    echo "./kvm2pve-src.sh remote-export"
-    echo "./kvm2pve-src.sh tunnel"
-    echo "./kvm2pve-src.sh tunnel-check"
+    echo "./vmigrate remote-export"
+    echo "./vmigrate tunnel"
+    echo "./vmigrate tunnel-check"
   elif [[ "$bitmap_ok" != "yes" ]]; then
     if [[ "$effective" == "blockdev-backup" ]]; then
-      echo "./kvm2pve-src.sh attach-target"
-      echo "./kvm2pve-src.sh check-target"
+      echo "./vmigrate attach-target"
+      echo "./vmigrate check-target"
     fi
-    echo "./kvm2pve-src.sh bitmap"
-    echo "./kvm2pve-src.sh check-bitmap"
+    echo "./vmigrate bitmap"
+    echo "./vmigrate check-bitmap"
   elif [[ "$full_started" != "1" ]]; then
-    echo "./kvm2pve-src.sh full"
+    echo "./vmigrate full"
   elif [[ "$full_completed" != "1" ]]; then
-    echo "./kvm2pve-src.sh wait-full"
+    echo "./vmigrate wait-full"
   elif [[ "$final_completed" != "1" ]]; then
-    echo "./kvm2pve-src.sh cutover-check"
-    echo "./kvm2pve-src.sh final"
+    echo "./vmigrate cutover-check"
+    echo "./vmigrate final"
   elif [[ "$source_stopped" != "1" ]]; then
-    echo "./kvm2pve-src.sh stop-source"
+    echo "./vmigrate stop-source"
   else
-    echo "./kvm2pve-src.sh remote-dst-close"
+    echo "./vmigrate remote-dst-close"
   fi
 }
 
 quick_start(){
   local vm_arg="${1:-}" token="${2:-}"
 
-  if [[ "$vm_arg" == KVM2PVE_HANDOFF_V1:* && -z "$token" ]]; then
+  if [[ "$vm_arg" == VMIGRATE_HANDOFF_V1:* && -z "$token" ]]; then
     token="$vm_arg"
     vm_arg=""
   fi
@@ -448,13 +448,13 @@ quick_start(){
     prompt_pve_connection
     discover "$vm_arg"
   else
-    warn "No handoff token supplied; run apply-handoff before preflight if destination values changed"
+    warn "No handoff token supplied; run apply-handoff before doctor if destination values changed"
     discover "$vm_arg"
   fi
 
   show_config
 
-  if confirm "Run source preflight now?"; then
+  if confirm "Run source doctor now?"; then
     preflight
   else
     warn "Preflight skipped"
@@ -464,9 +464,9 @@ quick_start(){
   next_steps
 }
 
-remote_dir(){ printf '/root/kvm2pve'; }
+remote_dir(){ printf '/root/vmigrate'; }
 remote_ssh(){
-  ssh -p "$PVE_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$PVE_SSH_USER@$PVE_HOST" "$@"
+  ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$TARGET_SSH_USER@$TARGET_HOST" "$@"
 }
 remote_ssh_batch(){
   remote_ssh "$@"
@@ -481,50 +481,50 @@ remote_prepare_next_steps(){
 Destination is prepared remotely.
 Now run:
 
-./kvm2pve-src.sh set-backup-method
-./kvm2pve-src.sh preflight
-./kvm2pve-src.sh remote-export
-./kvm2pve-src.sh tunnel
-./kvm2pve-src.sh tunnel-check
+./vmigrate set-backup-method
+./vmigrate doctor
+./vmigrate remote-export
+./vmigrate tunnel
+./vmigrate tunnel-check
 EOF
   if [[ "$effective" == "blockdev-backup" ]]; then
     cat <<EOF
-./kvm2pve-src.sh attach-target
-./kvm2pve-src.sh check-target
+./vmigrate attach-target
+./vmigrate check-target
 EOF
   fi
   cat <<EOF
-./kvm2pve-src.sh bitmap
-./kvm2pve-src.sh check-bitmap
-./kvm2pve-src.sh full
-./kvm2pve-src.sh wait-full
-./kvm2pve-src.sh report
+./vmigrate bitmap
+./vmigrate check-bitmap
+./vmigrate full
+./vmigrate wait-full
+./vmigrate report
 
 Optional monitor in another terminal:
-./kvm2pve-src.sh watch
+./vmigrate watch
 EOF
 }
 
 remote_prepare(){
-  local vm="${1:-}" pve_host="${2:-}" pve_vmid="${3:-}" ssh_port="${4:-22}" ssh_user="${5:-root}"
-  local dst_script rdir token prefix="KVM2PVE_HANDOFF_V1:"
+  local vm="${1:-}" target_host="${2:-}" target_id="${3:-}" ssh_port="${4:-22}" ssh_user="${5:-root}"
+  local dst_script rdir token prefix="VMIGRATE_HANDOFF_V1:"
 
-  [[ -n "$vm" && -n "$pve_host" && -n "$pve_vmid" ]] || die "Usage: ./kvm2pve-src.sh remote-prepare VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]"
-  case "$pve_vmid" in *[!0-9]*|'') die "Destination Proxmox VMID must be numeric" ;; esac
+  [[ -n "$vm" && -n "$target_host" && -n "$target_id" ]] || die "Usage: ./vmigrate remote-prepare VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]"
+  case "$target_id" in *[!0-9]*|'') die "Target ID must be numeric" ;; esac
   case "$ssh_port" in *[!0-9]*|'') die "SSH port must be numeric" ;; esac
-  [[ -f "$SCRIPT_DIR/kvm2pve-src.sh" ]] || die "Source helper missing: $SCRIPT_DIR/kvm2pve-src.sh"
-  dst_script="$SCRIPT_DIR/kvm2pve-dst.sh"
+  [[ -f "$SCRIPT_DIR/vmigrate" ]] || die "Source helper missing: $SCRIPT_DIR/vmigrate"
+  dst_script="$SCRIPT_DIR/vmigrate-agent"
   [[ -f "$dst_script" ]] || die "Destination helper missing: $dst_script"
 
   write_key VM_NAME "$vm"
-  write_key PVE_HOST "$pve_host"
-  write_key PVE_SSH_USER "$ssh_user"
-  write_key PVE_SSH_PORT "$ssh_port"
-  write_key PVE_VMID "$pve_vmid"
+  write_key TARGET_HOST "$target_host"
+  write_key TARGET_SSH_USER "$ssh_user"
+  write_key TARGET_SSH_PORT "$ssh_port"
+  write_key TARGET_ID "$target_id"
   [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP "$(default_bitmap "$vm")"
   [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE "$(default_target_node "$vm")"
   [[ -n "$(get_conf NBD_PORT)" ]] || write_key NBD_PORT 10809
-  write_key NBD_EXPORT "vm-${pve_vmid}"
+  write_key NBD_EXPORT "vm-${target_id}"
   [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
   [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
   [[ -n "$(get_conf BACKUP_METHOD)" ]] || write_key BACKUP_METHOD drive-backup
@@ -535,21 +535,21 @@ remote_prepare(){
 
   need ssh
   need scp
-  info "Testing SSH connectivity to ${PVE_SSH_USER}@${PVE_HOST}:${PVE_SSH_PORT}"
-  remote_ssh_batch true >/dev/null || die "Cannot connect to destination over SSH: ${PVE_SSH_USER}@${PVE_HOST}:${PVE_SSH_PORT}"
+  info "Testing SSH connectivity to ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}"
+  remote_ssh_batch true >/dev/null || die "Cannot connect to destination over SSH: ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}"
 
   info "Creating remote workspace: $rdir"
   remote_ssh "mkdir -p '$rdir'" || die "Could not create remote workspace: $rdir"
 
   info "Copying destination helper"
-  scp -P "$PVE_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$dst_script" "${PVE_SSH_USER}@${PVE_HOST}:${rdir}/kvm2pve-dst.sh" || die "Could not copy destination helper"
-  remote_ssh "chmod +x '$rdir/kvm2pve-dst.sh'" || die "Could not make destination helper executable"
+  scp -P "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$dst_script" "${TARGET_SSH_USER}@${TARGET_HOST}:${rdir}/vmigrate-agent" || die "Could not copy destination helper"
+  remote_ssh "chmod +x '$rdir/vmigrate-agent'" || die "Could not make destination helper executable"
 
-  info "Discovering destination VMID $PVE_VMID"
-  remote_ssh "cd '$rdir' && ./kvm2pve-dst.sh discover '$PVE_VMID' --yes" || die "Remote destination discover failed"
+  info "Discovering target ID $TARGET_ID"
+  remote_ssh "cd '$rdir' && ./vmigrate-agent discover '$TARGET_ID' --yes" || die "Remote destination discover failed"
 
   info "Reading destination handoff token"
-  token="$(remote_ssh "cd '$rdir' && ./kvm2pve-dst.sh handoff")" || die "Remote destination handoff failed"
+  token="$(remote_ssh "cd '$rdir' && ./vmigrate-agent handoff")" || die "Remote destination handoff failed"
   [[ "$token" == "$prefix"* ]] || die "Remote handoff token is invalid"
 
   apply_handoff "$token"
@@ -557,7 +557,7 @@ remote_prepare(){
   discover "$VM_NAME" --yes
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  [[ -n "${SRC_DISK:-}" && ( -b "$SRC_DISK" || -f "$SRC_DISK" ) && -n "${QEMU_DEVICE:-}" && -n "${QEMU_NODE:-}" ]] || die "Source discovery did not write valid SRC_DISK/QEMU_DEVICE/QEMU_NODE. Run: ./kvm2pve-src.sh discover $VM_NAME"
+  [[ -n "${SRC_DISK:-}" && ( -b "$SRC_DISK" || -f "$SRC_DISK" ) && -n "${QEMU_DEVICE:-}" && -n "${QEMU_NODE:-}" ]] || die "Source discovery did not write valid SRC_DISK/QEMU_DEVICE/QEMU_NODE. Run: ./vmigrate discover $VM_NAME"
   show_config
   remote_prepare_next_steps
 }
@@ -565,19 +565,19 @@ remote_prepare(){
 remote_export(){
   load_config
   need ssh
-  remote_ssh "cd '$(remote_dir)' && ./kvm2pve-dst.sh preflight && ./kvm2pve-dst.sh export && ./kvm2pve-dst.sh status"
+  remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent doctor && ./vmigrate-agent export && ./vmigrate-agent status"
 }
 
 remote_dst_status(){
   load_config
   need ssh
-  remote_ssh "cd '$(remote_dir)' && ./kvm2pve-dst.sh status"
+  remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent status"
 }
 
 remote_dst_close(){
   load_config
   need ssh
-  remote_ssh "cd '$(remote_dir)' && ./kvm2pve-dst.sh close"
+  remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent close"
 }
 
 qmp(){ local json="$1"; timeout "${QMP_TIMEOUT:-20}" virsh qemu-monitor-command "$VM_NAME" --pretty "$json"; }
@@ -771,7 +771,7 @@ discover(){
       "")
         ;;
       *)
-        [[ -z "$vm_arg" ]] || die "Usage: ./kvm2pve-src.sh discover [VM_NAME] [--yes]"
+        [[ -z "$vm_arg" ]] || die "Usage: ./vmigrate discover [VM_NAME] [--yes]"
         vm_arg="$arg"
         ;;
     esac
@@ -800,12 +800,12 @@ discover(){
   disk="$(printf '%s' "$chosen" | awk -F '\t' '{print $3}')"
   [[ -n "$disk" && ( -b "$disk" || -f "$disk" ) ]] || die "Detected SRC_DISK is missing or invalid: ${disk:-empty}"
   if (( assume_yes )) && [[ "$count" != "1" && -z "$existing_disk" ]]; then
-    die "Multiple source block devices found. Refusing --yes without an existing SRC_DISK. Run: ./kvm2pve-src.sh discover $VM_NAME"
+    die "Multiple source block devices found. Refusing --yes without an existing SRC_DISK. Run: ./vmigrate discover $VM_NAME"
   fi
   size="$(blockdev --getsize64 "$disk" 2>/dev/null || stat -c %s "$disk" 2>/dev/null || echo unknown)"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"; TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"; NBD_EXPORT="${NBD_EXPORT:-vm-${PVE_VMID}}"
+  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"; TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"; NBD_EXPORT="${NBD_EXPORT:-vm-${TARGET_ID}}"
   cat <<EOF
 
 Detected values
@@ -819,9 +819,9 @@ QEMU node           : $node
 Disk size           : $size
 Bitmap              : $BITMAP
 Target node         : $TARGET_NODE
-Proxmox             : ${PVE_SSH_USER}@${PVE_HOST}:${PVE_SSH_PORT}
-Proxmox VMID        : $PVE_VMID
-Proxmox disk        : $PVE_DISK
+Target              : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}
+Target ID        : $TARGET_ID
+Target disk        : $TARGET_DISK
 NBD port/export     : ${NBD_PORT}/${NBD_EXPORT}
 EOF
   if (( assume_yes )) || confirm "Write these detected values to config and continue with this VM?"; then
@@ -847,8 +847,8 @@ preflight(){
   virsh domstate "$VM_NAME" | grep -qE 'running|paused' || die "VM is not running/paused"
   [[ -n "$SRC_DISK" && ( -b "$SRC_DISK" || -f "$SRC_DISK" ) ]] || die "SRC_DISK missing or invalid. Run discover."
   [[ -n "$QEMU_DEVICE" && -n "$QEMU_NODE" ]] || die "QEMU_DEVICE/QEMU_NODE missing. Run discover."
-  [[ "$PVE_HOST" != "CHANGE_ME" ]] || die "Set PVE_HOST in $CONFIG_FILE"
-  ssh -p "$PVE_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "${PVE_SSH_USER}@${PVE_HOST}" "test -e '$PVE_DISK' && echo connected" >/dev/null || die "Cannot verify destination disk over SSH"
+  [[ "$TARGET_HOST" != "CHANGE_ME" ]] || die "Set TARGET_HOST in $CONFIG_FILE"
+  ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "${TARGET_SSH_USER}@${TARGET_HOST}" "test -e '$TARGET_DISK' && echo connected" >/dev/null || die "Cannot verify destination disk over SSH"
   ok "Preflight checks passed"
 }
 
@@ -861,7 +861,7 @@ tunnel_pids_for_forward(){
 }
 
 tunnel_pids(){
-  pgrep -af '(^|/)(autossh|ssh)( |$)' 2>/dev/null | awk -v fwd="${NBD_PORT}:127.0.0.1:${NBD_PORT}" -v host="$PVE_HOST" '
+  pgrep -af '(^|/)(autossh|ssh)( |$)' 2>/dev/null | awk -v fwd="${NBD_PORT}:127.0.0.1:${NBD_PORT}" -v host="$TARGET_HOST" '
     index($0, fwd) && index($0, host) {print $1}
   '
 }
@@ -894,16 +894,16 @@ tunnel_stop(){
 
 start_tunnel(){
   load_config; need ssh; need ss
-  [[ "$PVE_HOST" != "CHANGE_ME" ]] || die "Set PVE_HOST in $CONFIG_FILE"
+  [[ "$TARGET_HOST" != "CHANGE_ME" ]] || die "Set TARGET_HOST in $CONFIG_FILE"
   if [[ "$TUNNEL_MODE" == "direct" ]]; then warn "Direct mode selected; no SSH tunnel started"; return; fi
   if tunnel_listener_exists; then
     warn "Tunnel listener already exists on 127.0.0.1:${NBD_PORT}"
-    echo "Run: ./kvm2pve-src.sh tunnel-check"
-    echo "If stale, run: ./kvm2pve-src.sh tunnel-restart"
+    echo "Run: ./vmigrate tunnel-check"
+    echo "If stale, run: ./vmigrate tunnel-restart"
     return 0
   fi
   if [[ "$TUNNEL_MODE" == "autossh" ]]; then need autossh; fi
-  local args=(-f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -L "${NBD_PORT}:127.0.0.1:${NBD_PORT}" -p "$PVE_SSH_PORT" "${PVE_SSH_USER}@${PVE_HOST}")
+  local args=(-f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -L "${NBD_PORT}:127.0.0.1:${NBD_PORT}" -p "$TARGET_SSH_PORT" "${TARGET_SSH_USER}@${TARGET_HOST}")
   if [[ "$TUNNEL_MODE" == "autossh" ]]; then
     autossh -M "${AUTOSSH_MONITOR_PORT:-0}" "${args[@]}"
   else
@@ -914,14 +914,14 @@ start_tunnel(){
   for i in $(seq 1 "${CHECK_TIMEOUT:-8}"); do
     if tunnel_listener_exists; then
       ok "Tunnel listener is ready on 127.0.0.1:${NBD_PORT}"
-      echo "Run next: ./kvm2pve-src.sh tunnel-check"
+      echo "Run next: ./vmigrate tunnel-check"
       return 0
     fi
     sleep 1
   done
 
   ss -lntp | grep "${NBD_PORT}" || true
-  pgrep -af "(${NBD_PORT}:127.0.0.1:${NBD_PORT}|${PVE_HOST})" || true
+  pgrep -af "(${NBD_PORT}:127.0.0.1:${NBD_PORT}|${TARGET_HOST})" || true
   die "Tunnel command was sent, but no local listener appeared on 127.0.0.1:${NBD_PORT}"
 }
 
@@ -942,13 +942,13 @@ nbd_failure_message(){
   cat <<EOF
 ERROR NBD metadata did not respond within ${CHECK_TIMEOUT:-8}s.
 Try:
-./kvm2pve-src.sh tunnel-restart
-./kvm2pve-src.sh tunnel-check
+./vmigrate tunnel-restart
+./vmigrate tunnel-check
 If still failing:
-./kvm2pve-src.sh remote-dst-close
-./kvm2pve-src.sh remote-export
-./kvm2pve-src.sh tunnel-restart
-./kvm2pve-src.sh tunnel-check
+./vmigrate remote-dst-close
+./vmigrate remote-export
+./vmigrate tunnel-restart
+./vmigrate tunnel-check
 EOF
 }
 
@@ -1121,7 +1121,7 @@ jobs_cmd(){
 job_dismiss_cmd(){
   load_config
   local job="${1:-}" out
-  [[ -n "$job" ]] || die "Usage: ./kvm2pve-src.sh job-dismiss JOB_ID"
+  [[ -n "$job" ]] || die "Usage: ./vmigrate job-dismiss JOB_ID"
   if ! out="$(qmp '{"execute":"job-dismiss","arguments":{"id":"'"$job"'"}}' 2>/dev/null)"; then
     die "QMP job-dismiss timed out or failed"
   fi
@@ -1226,7 +1226,7 @@ full_sync(){
   state_write FULL_JOB_ID full
   state_write FULL_COMPLETED 0
   state_write FULL_COMPLETED_AT ""
-  ok "Full sync job submitted. Run: ./kvm2pve-src.sh wait-full"
+  ok "Full sync job submitted. Run: ./vmigrate wait-full"
 }
 
 mark_full(){
@@ -1250,7 +1250,7 @@ wait_full(){
 
 incremental_sync(){
   backup_job incremental inc1
-  ok "Incremental sync job submitted. Run: ./kvm2pve-src.sh wait-inc"
+  ok "Incremental sync job submitted. Run: ./vmigrate wait-inc"
 }
 
 wait_inc(){
@@ -1268,8 +1268,8 @@ Migration report
 ----------------
 VM name              : $VM_NAME
 Source disk          : ${SRC_DISK:-not set}
-Proxmox VMID         : $PVE_VMID
-Destination disk     : $PVE_DISK
+Target ID         : $TARGET_ID
+Target disk     : $TARGET_DISK
 Bitmap               : $BITMAP
 Target node          : $TARGET_NODE
 Backup method        : ${BACKUP_METHOD:-drive-backup}
@@ -1349,7 +1349,7 @@ watch_jobs(){
   while true; do
     clear || true
 
-    echo "kvm2pve watch"
+    echo "vmigrate watch"
     echo "------------"
     echo "VM            : $VM_NAME"
     echo "Backup method : $(effective_backup_method)"
@@ -1396,7 +1396,7 @@ watch_jobs(){
     if [[ "$status" == "concluded" ]]; then
       echo
       echo "Job concluded."
-      echo "Run: ./kvm2pve-src.sh jobs-dismiss-all"
+      echo "Run: ./vmigrate jobs-dismiss-all"
       echo
       echo "Note: watch is read-only and will not dismiss jobs."
     fi
@@ -1442,7 +1442,7 @@ final_cutover(){
 
 cleanup(){
   load_config
-  pkill -f "${NBD_PORT}:127.0.0.1:${NBD_PORT}.*${PVE_HOST}" >/dev/null 2>&1 || true
+  pkill -f "${NBD_PORT}:127.0.0.1:${NBD_PORT}.*${TARGET_HOST}" >/dev/null 2>&1 || true
   if bitmap_exists; then
     qmp '{"execute":"block-dirty-bitmap-remove","arguments":{"node":"'"$QEMU_NODE"'","name":"'"$BITMAP"'"}}' || true
   fi
@@ -1474,7 +1474,7 @@ migration_active_tunnels(){
   local nbd_port old_host
   nbd_port="$(get_conf NBD_PORT)"
   nbd_port="${nbd_port:-10809}"
-  old_host="$(get_conf PVE_HOST)"
+  old_host="$(get_conf TARGET_HOST)"
   command -v pgrep >/dev/null 2>&1 || return 1
   pgrep -af '(^|/)(autossh|ssh)( |$)' 2>/dev/null | awk -v fwd="${nbd_port}:127.0.0.1:${nbd_port}" -v host="$old_host" '
     index($0, fwd) && (host == "" || index($0, host)) {print}
@@ -1501,10 +1501,10 @@ migration_block_jobs_summary(){
 
 migration_state_files_for_other_vm(){
   local vm="$1" wanted dir f base found=0
-  wanted=".kvm2pve-state-$(sanitize_name "$vm")"
+  wanted=".vmigrate-state-$(sanitize_name "$vm")"
   dir="$(config_dir)"
   shopt -s nullglob
-  for f in "$dir"/.kvm2pve-state-*; do
+  for f in "$dir"/.vmigrate-state-*; do
     base="${f##*/}"
     [[ "$base" == "$wanted" ]] && continue
     printf '%s\n' "$f"
@@ -1514,7 +1514,7 @@ migration_state_files_for_other_vm(){
   (( found ))
 }
 
-migrate_preparation_guard(){
+create_preparation_guard(){
   local vm="$1" tunnels jobs states found=0
   tunnels="$(migration_active_tunnels || true)"
   jobs="$(migration_block_jobs_summary || true)"
@@ -1562,29 +1562,29 @@ EOF
   jobs_dismiss_all
 }
 
-migrate_workflow(){
-  local vm="$1" pve_vmid="$2" pve_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}"
+create_workflow(){
+  local vm="$1" target_id="$2" target_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}"
 
-  [[ -n "$vm" && -n "$pve_vmid" && -n "$pve_host" ]] || die "Usage: ./kvm2pve-src.sh migrate VM_NAME PVE_VMID PVE_HOST [SSH_PORT] [SSH_USER]"
-  case "$pve_vmid" in *[!0-9]*|'') die "Destination Proxmox VMID must be numeric" ;; esac
+  [[ -n "$vm" && -n "$target_id" && -n "$target_host" ]] || die "Usage: ./vmigrate create VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]"
+  case "$target_id" in *[!0-9]*|'') die "Target ID must be numeric" ;; esac
   case "$ssh_port" in *[!0-9]*|'') die "SSH port must be numeric" ;; esac
   [[ -n "$ssh_user" ]] || die "SSH user must not be empty"
 
   cat <<EOF
-kvm2pve migration
+vmigrate migration
 -----------------
 Source VM        : $vm
-Destination VMID : $pve_vmid
-Destination Host : $pve_host
-SSH              : ${ssh_user}@${pve_host}:${ssh_port}
+Target ID : $target_id
+Destination Host : $target_host
+SSH              : ${ssh_user}@${target_host}:${ssh_port}
 Backup method    : drive-backup
 EOF
 
-  migrate_preparation_guard "$vm"
+  create_preparation_guard "$vm"
   ask_exact "Continue with preparation? Type YES:" "YES" || die "Aborted"
 
-  # remote_prepare internal signature is: VM_NAME PVE_HOST PVE_VMID SSH_PORT SSH_USER
-  remote_prepare "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user"
+  # remote_prepare internal signature is: VM_NAME TARGET_HOST TARGET_ID SSH_PORT SSH_USER
+  remote_prepare "$vm" "$target_host" "$target_id" "$ssh_port" "$ssh_user"
   preflight
 
   write_key BACKUP_METHOD drive-backup
@@ -1618,8 +1618,8 @@ EOF
     cat <<EOF
 Full sync not started.
 Resume manually:
-  ./kvm2pve-src.sh full
-  ./kvm2pve-src.sh wait-full
+  ./vmigrate full
+  ./vmigrate wait-full
 EOF
     return 0
   fi
@@ -1638,9 +1638,9 @@ EOF
     cat <<EOF
 Cutover not started.
 Resume manually:
-  ./kvm2pve-src.sh cutover-check
-  ./kvm2pve-src.sh final
-  ./kvm2pve-src.sh report
+  ./vmigrate cutover-check
+  ./vmigrate final
+  ./vmigrate report
 EOF
     return 0
   fi
@@ -1679,7 +1679,7 @@ EOF
     cat <<EOF
 Source VM was not stopped.
 You can stop later:
-  ./kvm2pve-src.sh stop-source
+  ./vmigrate stop-source
 EOF
   fi
 
@@ -1691,15 +1691,15 @@ EOF
     cat <<EOF
 Cleanup skipped.
 You can clean later:
-  ./kvm2pve-src.sh tunnel-stop
-  ./kvm2pve-src.sh remote-dst-close
+  ./vmigrate tunnel-stop
+  ./vmigrate remote-dst-close
 EOF
   fi
 
   cat <<EOF
 Migration workflow finished.
 Review:
-  ./kvm2pve-src.sh report
+  ./vmigrate report
 EOF
 }
 
@@ -1709,14 +1709,14 @@ case "$cmd" in
   discover) discover "$@" ;;
   show) show_config ;;
   apply-handoff) apply_handoff "${1:-}" ;;
-  remote-prepare|migrate-prepare) remote_prepare "${1:-}" "${3:-}" "${2:-}" "${4:-22}" "${5:-root}" ;;
-  migrate) migrate_workflow "${1:-}" "${2:-}" "${3:-}" "${4:-22}" "${5:-root}" ;;
+  remote-prepare) remote_prepare "${1:-}" "${3:-}" "${2:-}" "${4:-22}" "${5:-root}" ;;
+  create) create_workflow "${1:-}" "${2:-}" "${3:-}" "${4:-22}" "${5:-root}" ;;
   remote-export) remote_export ;;
   remote-dst-status) remote_dst_status ;;
   remote-dst-close) remote_dst_close ;;
   quick) quick_start "${1:-}" "${2:-}" ;;
   next) next_steps ;;
-  preflight) preflight ;;
+  doctor) preflight ;;
   tunnel) start_tunnel ;;
   tunnel-stop) tunnel_stop ;;
   tunnel-restart) tunnel_restart ;;

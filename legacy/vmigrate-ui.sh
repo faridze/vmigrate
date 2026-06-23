@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Optional whiptail terminal UI for kvm2pve.
+# Optional whiptail terminal UI for vmigrate.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_SCRIPT="${SCRIPT_DIR}/kvm2pve-src.sh"
-DST_SCRIPT="${SCRIPT_DIR}/kvm2pve-dst.sh"
+SRC_SCRIPT="${SCRIPT_DIR}/vmigrate"
+DST_SCRIPT="${SCRIPT_DIR}/vmigrate-agent"
 VERSION="0.4.0"
 
 LAST_OUTPUT=""
@@ -17,11 +17,11 @@ WORKFLOW_ORDER="preflight remote-export tunnel tunnel-check attach-target bitmap
 
 missing_whiptail(){
   cat <<'EOF'
-whiptail is required for kvm2pve-ui.sh.
+whiptail is required for vmigrate-ui.
 
 Use the CLI remote workflow directly if whiptail is not available:
-  ./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
-  ./kvm2pve-src.sh next
+  ./vmigrate remote-prepare VM_NAME TARGET_HOST TARGET_ID [SSH_PORT] [SSH_USER]
+  ./vmigrate next
 
 CentOS/RHEL:
   yum install -y newt
@@ -102,7 +102,7 @@ capture_output(){
 }
 
 current_conf_value(){
-  local key="$1" default="${2:-}" file="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
+  local key="$1" default="${2:-}" file="${VMIGRATE_CONFIG:-${SCRIPT_DIR}/vmigrate.env}"
   [[ -f "$file" ]] || { printf '%s' "$default"; return 0; }
   awk -F= -v k="$key" -v d="$default" '$1==k {print substr($0, index($0,"=")+1); found=1; exit} END{if(!found) print d}' "$file"
 }
@@ -216,10 +216,10 @@ append_if_match(){
 summarize_output(){
   local action="$1" status="$2" out="$3" vm vmid nbd_port nbd_export disk bitmap
   vm="$(current_conf_value VM_NAME unknown)"
-  vmid="$(current_conf_value PVE_VMID unknown)"
+  vmid="$(current_conf_value TARGET_ID unknown)"
   nbd_port="$(current_conf_value NBD_PORT 10809)"
   nbd_export="$(current_conf_value NBD_EXPORT "vm-${vmid}")"
-  disk="$(current_conf_value PVE_DISK unknown)"
+  disk="$(current_conf_value TARGET_DISK unknown)"
   bitmap="$(current_conf_value BITMAP unknown)"
 
   if (( status == 0 )); then
@@ -232,10 +232,10 @@ summarize_output(){
     preflight)
       append_if_match "$out" 'Preflight checks passed' '[OK] Source checks passed'
       printf '[OK] Config loaded for VM: %s\n' "$vm"
-      printf '[OK] Destination SSH target: %s@%s:%s\n' "$(current_conf_value PVE_SSH_USER root)" "$(current_conf_value PVE_HOST unknown)" "$(current_conf_value PVE_SSH_PORT 22)"
+      printf '[OK] Destination SSH target: %s@%s:%s\n' "$(current_conf_value TARGET_SSH_USER root)" "$(current_conf_value TARGET_HOST unknown)" "$(current_conf_value TARGET_SSH_PORT 22)"
       ;;
     remote-export)
-      append_if_match "$out" 'Destination preflight checks passed' '[OK] Destination preflight passed'
+      append_if_match "$out" 'Destination doctor checks passed' '[OK] Destination doctor passed'
       append_if_match "$out" 'NBD export is ready|qemu-nbd.*ready' '[OK] qemu-nbd export started'
       printf 'Export name : %s\n' "$nbd_export"
       printf 'Port        : %s\n' "$nbd_port"
@@ -304,7 +304,7 @@ summarize_output(){
 build_dashboard_text(){
   local out="$1" vm vmid full final stopped tunnel bitmap export last
   vm="$(current_conf_value VM_NAME unknown)"
-  vmid="$(current_conf_value PVE_VMID unknown)"
+  vmid="$(current_conf_value TARGET_ID unknown)"
   full="$(printf '%s\n' "$out" | awk -F: '/FULL_COMPLETED[[:space:]]*:/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
   final="$(printf '%s\n' "$out" | awk -F: '/FINAL_COMPLETED[[:space:]]*:/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
   stopped="$(printf '%s\n' "$out" | awk -F: '/SOURCE_STOPPED[[:space:]]*:/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
@@ -314,7 +314,7 @@ build_dashboard_text(){
   last="$LAST_ACTION ($LAST_STATUS)"
 
   printf 'Source VM            : %s\n' "$vm"
-  printf 'Destination VMID     : %s\n' "$vmid"
+  printf 'Target ID     : %s\n' "$vmid"
   printf 'Full sync completed  : %s\n' "${full:-unknown}"
   printf 'Final completed      : %s\n' "${final:-unknown}"
   printf 'Source stopped       : %s\n' "${stopped:-unknown}"
@@ -431,17 +431,17 @@ ask_remote_prepare_form(){
   local vm host vmid user port
 
   default_vm="$(current_conf_value VM_NAME kvm3023)"
-  default_host="$(current_conf_value PVE_HOST CHANGE_ME)"
-  default_vmid="$(current_conf_value PVE_VMID '')"
-  default_user="$(current_conf_value PVE_SSH_USER root)"
-  default_port="$(current_conf_value PVE_SSH_PORT 22)"
+  default_host="$(current_conf_value TARGET_HOST CHANGE_ME)"
+  default_vmid="$(current_conf_value TARGET_ID '')"
+  default_user="$(current_conf_value TARGET_SSH_USER root)"
+  default_port="$(current_conf_value TARGET_SSH_PORT 22)"
   file="$(mktemp)"
 
   if whiptail_supports_form; then
     values="$(whiptail --title "New Migration" --form "Enter values on this SOURCE host." 16 78 6 \
       "Source VM:" 1 1 "$default_vm" 1 22 36 128 \
       "Destination Host:" 2 1 "$default_host" 2 22 36 128 \
-      "Destination VMID:" 3 1 "$default_vmid" 3 22 36 32 \
+      "Target ID:" 3 1 "$default_vmid" 3 22 36 32 \
       "SSH User:" 4 1 "$default_user" 4 22 36 64 \
       "SSH Port:" 5 1 "$default_port" 5 22 36 16 \
       3>&1 1>&2 2>&3)" || { rm -f "$file"; return 1; }
@@ -450,7 +450,7 @@ ask_remote_prepare_form(){
     whiptail --title "New Migration" --msgbox "This whiptail build does not support --form.\n\nThe UI will ask the same five values one by one." 10 78 1>&2 || true
     vm="$(ask_input "New Migration" "Source VM:" "$default_vm")" || { rm -f "$file"; return 1; }
     host="$(ask_input "New Migration" "Destination Host:" "$default_host")" || { rm -f "$file"; return 1; }
-    vmid="$(ask_input "New Migration" "Destination VMID:" "$default_vmid")" || { rm -f "$file"; return 1; }
+    vmid="$(ask_input "New Migration" "Target ID:" "$default_vmid")" || { rm -f "$file"; return 1; }
     user="$(ask_input "New Migration" "SSH User:" "$default_user")" || { rm -f "$file"; return 1; }
     port="$(ask_input "New Migration" "SSH Port:" "$default_port")" || { rm -f "$file"; return 1; }
     printf '%s\n%s\n%s\n%s\n%s\n' "$vm" "$host" "$vmid" "$user" "$port" > "$file"
@@ -462,13 +462,13 @@ ask_remote_prepare_form(){
 
 confirm_remote_prepare_summary(){
   local vm="$1" host="$2" vmid="$3" user="$4" port="$5"
-  whiptail --title "Confirm Remote Migration" --yesno "Source VM: $vm\nDestination Host: $host\nDestination VMID: $vmid\nSSH User: $user\nSSH Port: $port\n\nRun remote-prepare from this SOURCE host now?" 15 78
+  whiptail --title "Confirm Remote Migration" --yesno "Source VM: $vm\nDestination Host: $host\nTarget ID: $vmid\nSSH User: $user\nSSH Port: $port\n\nRun remote-prepare from this SOURCE host now?" 15 78
 }
 
 main_menu(){
   local choice
   while true; do
-    choice="$(whiptail --title "kvm2pve Terminal UI v${VERSION}" --menu "Choose an action." 20 78 10 \
+    choice="$(whiptail --title "vmigrate Terminal UI v${VERSION}" --menu "Choose an action." 20 78 10 \
       "start" "New Migration - source remote wizard" \
       "continue" "Continue Migration" \
       "status-report" "Status / Report" \
@@ -493,7 +493,7 @@ start_new_migration(){
     whiptail --title "New Migration" --msgbox "New Migration was cancelled.
 
 You can also use the CLI remote workflow:
-./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]" 11 78 || true
+./vmigrate remote-prepare VM_NAME TARGET_HOST TARGET_ID [SSH_PORT] [SSH_USER]" 11 78 || true
     return 0
   fi
   vm="$(sed -n '1p' "$file")"
@@ -577,10 +577,10 @@ manual_handoff_workflow(){
 
 start_destination_flow(){
   local vmid token tmp
-  vmid="$(ask_input "Destination Host" "Destination VMID:" "$(current_conf_value PVE_VMID '')")" || return 0
+  vmid="$(ask_input "Destination Host" "Target ID:" "$(current_conf_value TARGET_ID '')")" || return 0
   [[ -n "$vmid" ]] || return 0
-  run_command_with_input "Destination quick" "yes\n" "$DST_SCRIPT" quick "$vmid" || return 1
-  token="$(printf '%s\n' "$LAST_OUTPUT" | grep -m1 '^KVM2PVE_HANDOFF_V1:' || true)"
+  run_command_with_input "Target quick" "yes\n" "$DST_SCRIPT" quick "$vmid" || return 1
+  token="$(printf '%s\n' "$LAST_OUTPUT" | grep -m1 '^VMIGRATE_HANDOFF_V1:' || true)"
   if [[ -n "$token" ]]; then
     tmp="$(mktemp)"
     {
@@ -598,8 +598,8 @@ start_source_flow(){
   token="$(ask_input "Source Host" "Paste handoff token:" '')" || return 0
   [[ -n "$token" ]] || return 0
   vm="$(ask_input "Source Host" "Source VM:" "$(current_conf_value VM_NAME kvm3023)")" || return 0
-  host="$(ask_input "Source Host" "Destination Host:" "$(current_conf_value PVE_HOST CHANGE_ME)")" || return 0
-  port="$(ask_input "Source Host" "SSH Port:" "$(current_conf_value PVE_SSH_PORT 22)")" || return 0
+  host="$(ask_input "Source Host" "Destination Host:" "$(current_conf_value TARGET_HOST CHANGE_ME)")" || return 0
+  port="$(ask_input "Source Host" "SSH Port:" "$(current_conf_value TARGET_SSH_PORT 22)")" || return 0
   [[ -n "$port" ]] || port="22"
   input="${vm}\n${host}\n${port}\nyes\nno\n"
   run_command_with_input "Source quick" "$input" "$SRC_SCRIPT" quick "$token" || return 1
@@ -657,7 +657,7 @@ advanced_source_tools(){
   while true; do
     cmd="$(whiptail --title "Source Tools" --menu "Run a source-side command." 28 82 20 \
       "remote-prepare" "Prepare Destination Host over SSH" \
-      "remote-export" "Run Destination preflight/export/status over SSH" \
+      "remote-export" "Run Destination doctor/export/status over SSH" \
       "remote-dst-status" "Show remote Destination status" \
       "remote-dst-close" "Close remote Destination NBD" \
       "show" "Show config" \
@@ -717,8 +717,8 @@ advanced_destination_tools(){
       close) run_step close "Destination close" "$DST_SCRIPT" close || true ;;
       boot) run_step boot "Destination boot" "$DST_SCRIPT" boot || true ;;
       quick)
-        vmid="$(ask_input "Destination quick" "Destination VMID:" "$(current_conf_value PVE_VMID '')")" || continue
-        [[ -n "$vmid" ]] && run_command_with_input "Destination quick" "yes\n" "$DST_SCRIPT" quick "$vmid" || true
+        vmid="$(ask_input "Target quick" "Target ID:" "$(current_conf_value TARGET_ID '')")" || continue
+        [[ -n "$vmid" ]] && run_command_with_input "Target quick" "yes\n" "$DST_SCRIPT" quick "$vmid" || true
         ;;
       *) run_step "$cmd" "Destination: $cmd" "$DST_SCRIPT" "$cmd" || true ;;
     esac
