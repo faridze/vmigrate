@@ -1463,6 +1463,7 @@ EOF
 
   ask_exact "Continue with preparation? Type YES:" "YES" || die "Aborted"
 
+  # remote_prepare internal signature is: VM_NAME PVE_HOST PVE_VMID SSH_PORT SSH_USER
   remote_prepare "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user"
   preflight
 
