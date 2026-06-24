@@ -1,131 +1,183 @@
 # vmigrate
 
-Low-downtime KVM/Virtualizor to Target disk migration helper.
+Low-downtime KVM/Virtualizor to target disk migration helper.
 
-The supported production workflow is the CLI in `vmigrate` and
-`vmigrate-agent`. The old whiptail UI is kept only as legacy/experimental code
-under `legacy/vmigrate-ui.sh` and is not part of the supported migration path.
+`vmigrate` runs on the source KVM/Virtualizor host. `vmigrate-agent` runs on the destination Proxmox/target host.
 
-The default production backup method is `drive-backup`, which writes directly to
-the destination NBD export. `blockdev-backup` remains available for modern QEMU
-block graph workflows, but it requires `attach-target` and `check-target`.
-
-`drive_mirror`, old `virsh blockcopy --pivot`, and wrapper-driven workflows are
-not used.
-
-## Prerequisites
-
-### 1. Verify SSH connectivity
-
-From the source host:
+The recommended production workflow is:
 
 ```bash
-ssh root@TARGET_HOST
+./vmigrate create VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
 ```
 
-Example:
+Use placeholders such as `TARGET_HOST`; do not copy example IP addresses into production commands without checking them.
+
+## What create does
+
+`create` is the supported guided workflow. It:
+
+1. Creates a new migration run directory.
+2. Makes that run the active run.
+3. Prepares the destination automatically over SSH.
+4. Runs source and destination checks.
+5. Opens the destination NBD export.
+6. Creates or reuses a healthy SSH tunnel.
+7. Creates the dirty bitmap.
+8. Starts FULL sync and waits for completion.
+9. Optionally runs a pre-cutover incremental sync.
+10. Suspends the source VM and runs final incremental.
+11. Asks before stopping the source VM.
+12. Asks before closing the destination NBD export and local tunnel.
+
+The source VM remains running until final cutover.
+
+## Run directories
+
+Each `create` run is archived separately:
+
+```text
+migrations/<VM_NAME>/<RUN_ID>/
+├── run.log
+├── config
+├── report.pre-full.txt
+├── report.after-full.txt
+└── report.final.txt
+```
+
+Example layout:
+
+```text
+migrations/v2698/20260624-013000/run.log
+migrations/v2698/20260624-013000/config
+```
+
+The selected run is stored in:
+
+```text
+.vmigrate-active
+```
+
+Normal commands use the active run automatically. If no active run exists, `vmigrate` falls back to the legacy/default `vmigrate.env`.
+
+## Active run commands
+
+List migration runs:
 
 ```bash
-ssh root@192.0.2.10
+./vmigrate list
 ```
 
-### 2. Configure passwordless SSH (recommended)
+Show the active run:
+
+```bash
+./vmigrate active
+```
+
+Switch to a run by VM and run ID:
+
+```bash
+./vmigrate use VM_NAME RUN_ID
+```
+
+Switch to a run by directory:
+
+```bash
+./vmigrate use migrations/VM_NAME/RUN_ID
+```
+
+Clear active run and fall back to `vmigrate.env`:
+
+```bash
+./vmigrate clear-active
+```
+
+Advanced override:
+
+```bash
+VMIGRATE_CONFIG=/opt/vmigrate/migrations/VM_NAME/RUN_ID/config ./vmigrate report
+```
+
+## Requirements
+
+Verify SSH from the source host to the destination host:
+
+```bash
+ssh -p SSH_PORT root@TARGET_HOST hostname
+```
+
+Passwordless SSH is recommended:
 
 ```bash
 ssh-keygen -t ed25519
-ssh-copy-id root@TARGET_HOST
+ssh-copy-id -p SSH_PORT root@TARGET_HOST
 ```
 
-Verify:
+Install `autossh` on the source host:
 
 ```bash
-ssh root@TARGET_HOST hostname
-```
-
-### 3. Install autossh
-
-Debian / Ubuntu:
-
-```bash
-apt update
 apt install -y autossh
 ```
 
-AlmaLinux / Rocky:
+or:
 
 ```bash
 dnf install -y autossh
 ```
 
-CentOS 7:
-
-```bash
-curl -LO https://dl.fedoraproject.org/pub/epel/7/x86_64/Packages/a/autossh-1.4g-1.el7.x86_64.rpm
-yum install -y ./autossh-1.4g-1.el7.x86_64.rpm
-autossh -V
-```
-
-### 4. Verify destination VM is powered off
+On the destination, the target VM should be powered off before export:
 
 ```bash
 qm status TARGET_ID
 ```
 
-The destination VM must not be running during migration.
+If it is running, `create` asks before stopping it.
 
-## Files
+## Recommended workflow
 
-```text
-vmigrate                 Run on source Virtualizor/KVM host
-vmigrate-agent                 Run on destination target host
-legacy/vmigrate-ui.sh           Legacy/experimental terminal UI
-examples/vmigrate.env.example   Example shared config
-```
-
-## One-Command Interactive Migration
-
-Use `create` for the supported CLI replacement for the abandoned UI:
+Start a migration:
 
 ```bash
-./vmigrate create VM_NAME TARGET_ID 192.0.2.10 22 root
+./vmigrate create VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
 ```
 
-Argument order is:
+During the guided workflow, type only the requested confirmations:
 
 ```text
-VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
+YES
+FULL
+CUTOVER
+STOP
+CLEAN
 ```
 
-The interactive workflow runs `remote-prepare`, `doctor`, checks for stale migration artifacts, `remote-export`, `tunnel`, `tunnel-check`, bitmap creation, and bitmap
-verification. It then asks before starting FULL sync, shows `wait-full` progress,
-asks before CUTOVER, asks before stopping the source VM, and asks before cleanup.
+Use `STOP` only after final cutover has completed and you are ready to stop the source VM.
 
-A `qemu-io` read sample warning from `tunnel-check` does not block migration when
-NBD metadata is reachable. The real validation is that FULL sync starts and
-`wait-full` shows progress.
+Use `CLEAN` to close the destination NBD export and local tunnel.
 
-The `create` workflow optionally performs a pre-cutover incremental
-synchronization while the source VM is still running. This minimizes downtime
-because most changed blocks are transferred before the VM is suspended for the
-final synchronization.
+## Reports and logs
 
-The workflow never deletes disks, never undefines VMs, never wipes filesystems,
-and never removes LVs or storage.
+During `create`, logs and reports are saved automatically inside the run directory.
 
-## Supported Remote CLI Workflow
+Show current run status:
 
-Run from the SOURCE host only. `remote-prepare` writes the remote connection
-settings, copies the destination helper over SSH, runs destination discovery,
-applies the handoff locally, then runs source discovery. Source discovery writes
-`SRC_DISK`, `QEMU_DEVICE`, and `QEMU_NODE` automatically when the source VM has a
-single unambiguous disk. If multiple source block devices are found, run
-`./vmigrate discover VM_NAME` manually and confirm the correct disk.
+```bash
+./vmigrate report
+```
 
-Main workflow with the default `drive-backup` method:
+Watch active block job progress:
+
+```bash
+./vmigrate watch
+```
+
+`watch` is read-only. It does not dismiss jobs or change VM/state.
+
+## Manual workflow
+
+For manual operation from the source host:
 
 ```bash
 ./vmigrate remote-prepare VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
-./vmigrate set-backup-method
 ./vmigrate doctor
 ./vmigrate remote-export
 ./vmigrate tunnel
@@ -136,32 +188,6 @@ Main workflow with the default `drive-backup` method:
 ./vmigrate wait-full
 ./vmigrate report
 ```
-
-Normal tunnel flow:
-
-```bash
-./vmigrate remote-prepare VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
-./vmigrate doctor
-./vmigrate remote-export
-./vmigrate tunnel
-./vmigrate tunnel-check
-```
-
-For `blockdev-backup` only, run these after `tunnel-check` and before `bitmap`:
-
-```bash
-./vmigrate attach-target
-./vmigrate check-target
-```
-
-Optional monitor:
-
-```bash
-./vmigrate watch
-```
-
-`watch` is read-only. It does not dismiss jobs or change VM/state. Use
-`wait-full`, `wait-inc`, or `final` to wait for and dismiss concluded jobs.
 
 Cutover:
 
@@ -176,55 +202,75 @@ Cutover:
 Start the destination VM only after:
 
 - final completed successfully
-- source VM stopped
-- destination export closed
+- source VM is stopped
+- destination NBD export is closed
 
-## Optional Incremental Sync
+## Optional pre-cutover incremental
 
-Run an incremental sync between full sync and final cutover:
+After FULL completion and before final cutover:
 
 ```bash
 ./vmigrate incremental
 ./vmigrate wait-inc
 ```
 
-`incremental` submits job `inc1` only. `wait-inc` waits for the block job to
-finish and dismisses concluded jobs so they do not block later steps.
+This reduces the final delta before the source VM is suspended.
 
-## Job Tools
+## Job tools
 
-Use these if QEMU reports a running or concluded block job:
+Show block jobs:
 
 ```bash
 ./vmigrate jobs
-./vmigrate job-dismiss inc1
+```
+
+Dismiss concluded jobs:
+
+```bash
 ./vmigrate jobs-dismiss-all
 ```
 
-`jobs` prints raw `query-block-jobs` JSON and a short summary. QMP calls use a
-timeout so status/report/job commands do not wait forever on a stuck monitor.
+Cancel a running job:
 
-## Troubleshooting Tunnel Warnings
+```bash
+./vmigrate job-cancel JOB_ID
+```
 
-If `tunnel-check` prints `OK NBD metadata reachable` but warns that the read
-sample failed or timed out, retry once:
+Force-cancel a stuck job:
+
+```bash
+./vmigrate job-cancel-force JOB_ID
+```
+
+Use force cancel only to abort a stuck or failed migration. The destination disk may be incomplete afterward.
+
+Common job IDs:
+
+```text
+full
+inc1
+final
+```
+
+## Tunnel and NBD checks
+
+Normal check:
 
 ```bash
 ./vmigrate tunnel-check
 ```
 
-The read sample is a best-effort probe. `qemu-img info` proving the NBD metadata
-is reachable is the hard tunnel health requirement.
+By default, `tunnel-check` requires NBD metadata to be reachable.
 
-If `tunnel-check` hangs or fails because an old SSH/autossh forwarder is stale,
-restart only the local tunnel and check again:
+Optional read sample:
 
 ```bash
-./vmigrate tunnel-restart
-./vmigrate tunnel-check
+VMIGRATE_NBD_READ_SAMPLE=1 ./vmigrate tunnel-check
 ```
 
-If that still fails, reset the destination export and rebuild the tunnel:
+If metadata is reachable and FULL sync starts with progress, the tunnel is usable.
+
+If the tunnel/export is stale:
 
 ```bash
 ./vmigrate tunnel-stop
@@ -234,162 +280,58 @@ If that still fails, reset the destination export and rebuild the tunnel:
 ./vmigrate tunnel-check
 ```
 
-If `full` hangs after a read sample warning, reset the block jobs and
-tunnel/export path:
+## Destination helper
+
+`remote-prepare` copies `vmigrate-agent` to the destination automatically.
+
+Manual destination commands:
 
 ```bash
-./vmigrate jobs
-./vmigrate jobs-dismiss-all
-./vmigrate remote-dst-close
-./vmigrate remote-export
-./vmigrate tunnel
-./vmigrate tunnel-check
+cd /root/vmigrate
+./vmigrate-agent doctor
+./vmigrate-agent export
+./vmigrate-agent status
+./vmigrate-agent close
 ```
 
-## Alternative Manual Handoff Workflow
-
-Use this path when the source host cannot SSH to the destination target host.
-
-Destination:
+Boot the destination VM only after final cutover and source stop:
 
 ```bash
-./vmigrate-agent quick 2679
+./vmigrate-agent boot
 ```
 
-Follow the printed instructions and use the handoff token manually.
+## Safety notes
 
-## Handoff Token Format
+`vmigrate` does not delete disks, remove LVs, wipe filesystems, or undefine VMs.
 
-Destination:
+`stop-source` refuses to stop the source VM unless final cutover completed.
 
-```bash
-./vmigrate-agent discover 2679
-./vmigrate-agent handoff
-```
+`final` refuses to suspend the source VM unless `cutover-check` passes.
 
-Example output:
+Do not resume the source VM after final cutover unless you are intentionally rolling back.
+
+## Parallel migrations
+
+Multiple migrations on different source hosts are fine.
+
+Multiple concurrent migrations on the same source host are not recommended yet. Run-based config makes tracking safer, but parallel operation still needs separate ports and careful I/O planning.
+
+Recommended production approach:
+
+1. Run FULL syncs one by one.
+2. Perform cutovers one by one.
+3. Review each run with `./vmigrate list` and `./vmigrate report`.
+
+## Files
 
 ```text
-VMIGRATE_HANDOFF_V1:...
+vmigrate          Source-side helper
+vmigrate-agent    Destination-side helper
+migrations/       Per-run logs, config, and reports
+.vmigrate-active  Active run pointer
+vmigrate.env      Legacy/default fallback config
 ```
 
-Source:
+## Legacy UI
 
-```bash
-./vmigrate apply-handoff 'VMIGRATE_HANDOFF_V1:...'
-```
-
-## Legacy/Experimental Terminal UI
-
-The terminal UI is retained for reference only and is not part of the supported
-production workflow:
-
-```bash
-./legacy/vmigrate-ui.sh
-```
-
-## Source Commands
-
-```text
-discover [VM_NAME] [--yes]
-init
-show
-apply-handoff
-remote-prepare VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
-remote-export
-remote-dst-status
-remote-dst-close
-quick
-next
-doctor
-tunnel
-tunnel-stop
-tunnel-restart
-tunnel-status
-tunnel-check
-attach-target
-check-target
-bitmap
-check-bitmap
-full
-wait-full
-mark-full
-set-backup-method
-incremental
-wait-inc
-jobs
-job-dismiss JOB_ID
-jobs-dismiss-all
-cutover-check
-check-paused
-final
-watch
-status
-report
-verify-sample
-cleanup
-stop-source
-```
-
-## Destination Commands
-
-```text
-discover
-init
-show
-handoff
-quick
-doctor
-export
-close
-boot
-status
-```
-
-## Safe Production Sequence
-
-```text
-1. Prepare destination VM disk on the target platform
-2. Run source discovery and confirm config
-3. Apply destination handoff or run remote-prepare from source
-4. Choose/confirm backup method with set-backup-method
-5. Run source doctor
-6. Export destination disk with qemu-nbd using remote-export or destination export
-7. Create SSH tunnel from source to destination NBD
-8. Validate the tunnel and the real NBD export with tunnel-check
-9. For blockdev-backup only, add and check the destination target node
-10. Create dirty bitmap on source disk node
-11. Run full sync while VM is running
-12. Wait until full sync completes with wait-full
-13. Run optional incremental syncs with incremental and wait-inc
-14. Run cutover-check
-15. Lock customer panel controls
-16. Suspend source VM through final
-17. Let final run the final incremental and wait internally
-18. Stop source VM
-19. Close qemu-nbd export
-20. Boot destination VM
-21. Validate guest services
-```
-
-## Warning
-
-This tool writes directly to the destination VM disk via qemu-nbd. Use only with
-a prepared destination disk. Do not point it at a disk containing data you need.
-
-`stop-source` only stops/destroys the source VM. It must never delete disks or
-storage.
-
-### Closing a migration session
-
-`remote-dst-close` closes only the destination qemu-nbd export.
-
-`remote-dst-close` does not stop the SSH tunnel.
-
-To completely close a migration session:
-
-    ./vmigrate tunnel-stop
-    ./vmigrate remote-dst-close
-
-TCP states such as `FIN-WAIT-2` or `CLOSE-WAIT` may remain briefly and are usually harmless. The important check is that no `qemu-nbd` listener remains on port `10809`.
-
+The old terminal UI is retained only as legacy/experimental code under `legacy/`. The supported production workflow is the `vmigrate` CLI.
