@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.6"
+VERSION="0.4.7"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -1062,12 +1062,13 @@ wait_jobs_empty(){
     job="$(printf '%s\n' "$out" | awk -F'"' '/"device"/ {print $4; exit}')"
     IFS=$'\t' read -r offset len parsed_status <<< "$(printf '%s\n' "$out" | progress_from_jobs_json)"
     [[ -n "$parsed_status" ]] && status="$parsed_status"
-    progress="$(progress_line "$offset" "$len" "${status:-running}")"
     if (( compact )); then
-      printf '\r%s' "$progress"
+      printf '\r\033[K'
+      progress_line "$offset" "$len" "${status:-running}"
       compact_printed=1
     else
-      printf '%s\n' "$progress"
+      progress_line "$offset" "$len" "${status:-running}"
+      printf '\n'
     fi
     if [[ "$status" == "concluded" ]]; then
       (( compact_printed )) && printf '\n'
@@ -1858,8 +1859,8 @@ watch_jobs(){
     [[ -n "$parsed_status" ]] && status="$parsed_status"
 
     echo "Job           : ${job:-unknown}"
-    progress="$(progress_line "$offset" "$len" "${status:-running}")"
-    echo "$progress"
+    progress_line "$offset" "$len" "${status:-running}"
+    echo
 
     if printf '%s\n' "$out" | grep -q '"error"'; then
       echo
