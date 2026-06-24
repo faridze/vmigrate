@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.5"
+VERSION="0.4.6"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -941,20 +941,93 @@ block_jobs_summary(){
     }'
 }
 
+PROGRESS_START_TS=0
+PROGRESS_START_OFFSET=0
+PROGRESS_TRACK_LEN=0
+
+format_bytes(){
+  local bytes="${1:-0}"
+  awk -v b="$bytes" 'BEGIN {
+    split("B KiB MiB GiB TiB PiB", u, " ")
+    i = 1
+    while (b >= 1024 && i < 6) {
+      b = b / 1024
+      i++
+    }
+    if (i == 1) {
+      printf "%.0f %s", b, u[i]
+    } else {
+      printf "%.1f %s", b, u[i]
+    }
+  }'
+}
+
+format_duration(){
+  local sec="${1:-0}" h m s
+  [[ "$sec" =~ ^[0-9]+$ ]] || { printf 'n/a'; return 0; }
+  h=$(( sec / 3600 ))
+  m=$(( (sec % 3600) / 60 ))
+  s=$(( sec % 60 ))
+  printf '%02d:%02d:%02d' "$h" "$m" "$s"
+}
+
 progress_line(){
-  local offset="${1:-0}" len="${2:-0}" status="${3:-running}" width=30 pct filled empty bar
+  local offset="${1:-0}" len="${2:-0}" status="${3:-running}" width=30
+  local pct filled empty bar now elapsed delta speed remaining eta
+  local offset_h len_h speed_h elapsed_h eta_h
+
   if [[ "$len" =~ ^[0-9]+$ && "$offset" =~ ^[0-9]+$ && "$len" -gt 0 ]]; then
     pct=$(( offset * 100 / len ))
     (( pct > 100 )) && pct=100
     filled=$(( pct * width / 100 ))
     empty=$(( width - filled ))
+
+    now="$(date +%s)"
+
+    if [[ "$PROGRESS_START_TS" -eq 0 || "$PROGRESS_TRACK_LEN" != "$len" || "$offset" -lt "$PROGRESS_START_OFFSET" ]]; then
+      PROGRESS_START_TS="$now"
+      PROGRESS_START_OFFSET="$offset"
+      PROGRESS_TRACK_LEN="$len"
+    fi
+
+    elapsed=$(( now - PROGRESS_START_TS ))
+    delta=$(( offset - PROGRESS_START_OFFSET ))
+
+    elapsed_h="$(format_duration "$elapsed")"
+
+    if [[ "$elapsed" -gt 0 && "$delta" -gt 0 ]]; then
+      speed=$(( delta / elapsed ))
+      remaining=$(( len - offset ))
+      (( remaining < 0 )) && remaining=0
+
+      if [[ "$speed" -gt 0 ]]; then
+        eta=$(( remaining / speed ))
+        speed_h="$(format_bytes "$speed")/s"
+        eta_h="$(format_duration "$eta")"
+      else
+        speed_h="n/a"
+        eta_h="n/a"
+      fi
+    else
+      speed_h="n/a"
+      eta_h="n/a"
+    fi
+
+    offset_h="$(format_bytes "$offset")"
+    len_h="$(format_bytes "$len")"
   else
     pct=0
     filled=0
     empty=$width
+    offset_h="${offset:-0}"
+    len_h="${len:-0}"
+    speed_h="n/a"
+    elapsed_h="00:00:00"
+    eta_h="n/a"
   fi
+
   bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
-  printf '[%s] %d%% | %s | %s / %s' "$bar" "$pct" "$status" "${offset:-0}" "${len:-0}"
+  printf '[%s] %d%% | %s | %s / %s | %s | elapsed %s | eta %s' "$bar" "$pct" "$status" "$offset_h" "$len_h" "$speed_h" "$elapsed_h" "$eta_h"
 }
 
 progress_from_jobs_json(){
