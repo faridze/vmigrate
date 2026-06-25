@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.25"
+VERSION="0.4.26"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -57,6 +57,7 @@ Usage:
   ./vmigrate init
   ./vmigrate show
   ./vmigrate list
+  ./vmigrate history
   ./vmigrate active
   ./vmigrate use VM_NAME RUN_ID
   ./vmigrate use RUN_DIR
@@ -103,6 +104,8 @@ Usage:
   ./vmigrate verify [SAMPLES]
   ./vmigrate verify-sample [SAMPLES]
   ./vmigrate cleanup
+  ./vmigrate cleanup-stale
+  ./vmigrate lock-status
   ./vmigrate stop-source
 
 Recommended first run:
@@ -301,7 +304,7 @@ runs_list(){
   base="$(runs_base_dir)"
   active="$(active_run_dir 2>/dev/null || true)"
 
-  printf '%-6s %-18s %-20s %-15s %-5s %-5s %s\n' "ACTIVE" "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "REL_DIR"
+  printf '%-6s %-18s %-20s %-15s %-5s %-5s %-8s %s\n' "ACTIVE" "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "VERIFY" "REL_DIR"
 
   shopt -s nullglob
   for dir in "$base"/*/*; do
@@ -333,7 +336,10 @@ runs_list(){
     [[ -n "$active" && "$dir" == "$active" ]] && mark="*"
 
     rel_dir="migrations/${dir#"$base"/}"
-    printf '%-6s %-18s %-20s %-15s %-5s %-5s %s\n' "$mark" "$vm" "$run" "$status" "$full" "$final" "$rel_dir"
+    verify="unset"
+    [[ -f "$dir/summary.txt" ]] && verify="$(awk -F= '$1=="VERIFY"{print $2; exit}' "$dir/summary.txt")"
+    [[ -n "$verify" ]] || verify="unset"
+    printf '%-6s %-18s %-20s %-15s %-5s %-5s %-8s %s\n' "$mark" "$vm" "$run" "$status" "$full" "$final" "$verify" "$rel_dir"
   done
   shopt -u nullglob
 
@@ -2415,6 +2421,8 @@ batch_prepare_full_one(){
   IN_CREATE_WORKFLOW=1
   IN_BATCH_WORKFLOW=1
   start_log "$vm"
+  lock_acquire "$vm"
+  trap 'lock_release "$vm"; summary_finish "FAILED" "FAILED"' ERR
 
   CONFIG_FILE="${RUN_DIR}/config"
   : > "$CONFIG_FILE"
@@ -2422,7 +2430,6 @@ batch_prepare_full_one(){
   activate_run_dir "$RUN_DIR"
 
   summary_init "$vm" "$target_id" "$target_host" "$batch_id"
-  trap 'summary_finish "FAILED" "FAILED"' ERR
 
   cat <<EOF
 vmigrate batch-full item
@@ -2482,6 +2489,7 @@ EOF
   archive_report "report.after-full"
 
   summary_finish "SUCCESS" "AFTER_FULL"
+  lock_release "$vm"
   trap - ERR
 
   # Batch mode must free the common port/export before moving to the next VM.
@@ -2585,6 +2593,115 @@ batch_full(){
 }
 
 
+lock_dir(){ printf '%s/locks\n' "$SCRIPT_DIR"; }
+lock_path_for_vm(){ printf '%s/%s.lock\n' "$(lock_dir)" "$(sanitize_name "$1")"; }
+
+lock_acquire(){
+  local vm="$1" lock path now oldpid oldcmd
+  [[ -n "$vm" ]] || die "lock_acquire requires VM name"
+  mkdir -p "$(lock_dir)"
+  lock="$(lock_path_for_vm "$vm")"
+
+  if mkdir "$lock" 2>/dev/null; then
+    {
+      echo "VM=$vm"
+      echo "PID=$$"
+      echo "START_TIME=$(now_ts)"
+      echo "COMMAND=${0##*/} ${*:-}"
+      echo "RUN_DIR=${RUN_DIR:-}"
+    } > "$lock/info"
+    return 0
+  fi
+
+  oldpid="$(awk -F= '$1=="PID"{print $2; exit}' "$lock/info" 2>/dev/null || true)"
+  if [[ -n "$oldpid" ]] && kill -0 "$oldpid" 2>/dev/null; then
+    echo "Active lock found:"
+    cat "$lock/info" 2>/dev/null || true
+    die "Another vmigrate operation is already running for VM: $vm"
+  fi
+
+  warn "Stale lock detected for $vm; removing: $lock"
+  rm -rf "$lock"
+  mkdir "$lock" || die "Could not acquire lock: $lock"
+  {
+    echo "VM=$vm"
+    echo "PID=$$"
+    echo "START_TIME=$(now_ts)"
+    echo "COMMAND=${0##*/} ${*:-}"
+    echo "RUN_DIR=${RUN_DIR:-}"
+  } > "$lock/info"
+}
+
+lock_release(){
+  local vm="$1" lock pid
+  [[ -n "$vm" ]] || return 0
+  lock="$(lock_path_for_vm "$vm")"
+  [[ -d "$lock" ]] || return 0
+  pid="$(awk -F= '$1=="PID"{print $2; exit}' "$lock/info" 2>/dev/null || true)"
+  [[ "$pid" == "$$" || -z "$pid" ]] && rm -rf "$lock"
+}
+
+lock_status(){
+  local base found=0 f pid vm
+  base="$(lock_dir)"
+  [[ -d "$base" ]] || { echo "No locks."; return 0; }
+  shopt -s nullglob
+  for f in "$base"/*.lock; do
+    found=1
+    echo
+    echo "Lock: $f"
+    cat "$f/info" 2>/dev/null || true
+    pid="$(awk -F= '$1=="PID"{print $2; exit}' "$f/info" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "Status=active"
+    else
+      echo "Status=stale"
+    fi
+  done
+  shopt -u nullglob
+  (( found )) || echo "No locks."
+}
+
+cleanup_stale(){
+  load_config
+  echo "cleanup-stale"
+  echo "-------------"
+  echo "VM        : $VM_NAME"
+  echo "Target    : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}"
+  echo "NBD       : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}"
+  echo "Run config: $CONFIG_FILE"
+  echo
+  echo "This only attempts safe cleanup for the active/current config:"
+  echo "- stop local SSH/autossh tunnel for this NBD port/target"
+  echo "- close remote destination NBD export through vmigrate-agent"
+  echo "- dismiss concluded QMP block jobs"
+  echo "- remove stale local lock for this VM if PID is dead"
+  echo
+  ask_exact "Continue cleanup-stale? Type CLEAN:" "CLEAN" || die "Aborted"
+
+  tunnel_stop || warn "Local tunnel stop failed or no matching tunnel was found."
+  remote_dst_close || warn "Remote NBD close failed or no export was found."
+  jobs_dismiss_all || warn "QMP job dismiss failed or no concluded jobs were found."
+
+  local lock pid
+  lock="$(lock_path_for_vm "$VM_NAME")"
+  if [[ -d "$lock" ]]; then
+    pid="$(awk -F= '$1=="PID"{print $2; exit}' "$lock/info" 2>/dev/null || true)"
+    if [[ -z "$pid" || ! kill -0 "$pid" 2>/dev/null ]]; then
+      rm -rf "$lock"
+      ok "Removed stale lock: $lock"
+    else
+      warn "Lock is active, not removed: $lock"
+    fi
+  fi
+
+  ok "cleanup-stale completed"
+}
+
+history_cmd(){
+  runs_list
+}
+
 create_workflow(){
   local vm="$1" target_id="$2" target_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}"
 
@@ -2595,6 +2712,8 @@ create_workflow(){
 
   IN_CREATE_WORKFLOW=1
   start_log "$vm"
+  lock_acquire "$vm"
+  trap 'lock_release "$vm"' EXIT
 
   cat <<EOF
 vmigrate migration
@@ -2747,6 +2866,8 @@ Migration workflow finished.
 Review:
   ./vmigrate report
 EOF
+  lock_release "$vm"
+  trap - EXIT
 }
 
 cmd="${1:-}"; shift || true
@@ -2756,6 +2877,7 @@ case "$cmd" in
   discover) discover "$@" ;;
   show) show_config ;;
   list) runs_list ;;
+  history) history_cmd ;;
   active) run_active ;;
   use) run_use "${1:-}" "${2:-}" ;;
   env) run_env "${1:-}" "${2:-}" ;;
@@ -2799,6 +2921,8 @@ case "$cmd" in
   verify) sample_verify "${1:-64}" ;;
   verify-sample) sample_verify "${1:-64}" ;;
   cleanup) cleanup ;;
+  cleanup-stale) cleanup_stale ;;
+  lock-status) lock_status ;;
   stop-source) stop_source ;;
   -h|--help|help|"") usage ;;
   *) usage; die "Unknown command: $cmd" ;;
