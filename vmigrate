@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.16"
+VERSION="0.4.17"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2250,6 +2250,11 @@ EOF
 
   write_key BACKUP_METHOD drive-backup
   load_config
+
+  # Ensure batch cleanup helpers use the batch connection settings.
+  TARGET_HOST="$target_host"
+  SSH_PORT="$ssh_port"
+  SSH_USER="$ssh_user"
 
   # Batch mode is non-interactive. Clean stale tunnel/export for this run and retry once.
   tunnel_stop || true
