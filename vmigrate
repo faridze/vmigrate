@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.20"
+VERSION="0.4.21"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -1504,14 +1504,16 @@ jobs_cmd(){
     warn "VM may be stopped/suspended or QMP is not responding."
     return 1
   fi
-  printf '%s\n' "$out"
+  if printf '%s\n' "$out" | grep -q '"error"'; then
+    printf '%s\n' "$out"
+    return 1
+  fi
+
   if printf '%s\n' "$out" | grep -q '"type"'; then
-    echo
-    echo "Summary:"
+    echo "Block jobs:"
     printf '%s\n' "$out" | block_jobs_summary
   else
-    echo
-    echo "Summary: no block jobs"
+    echo "No active block jobs."
   fi
 }
 
