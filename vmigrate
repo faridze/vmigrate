@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.7"
+VERSION="0.4.19"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -65,6 +65,7 @@ Usage:
   ./vmigrate apply-handoff HANDOFF_TOKEN
   ./vmigrate remote-prepare VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
   ./vmigrate create VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
+  ./vmigrate batch-full BATCH_FILE
   ./vmigrate remote-export
   ./vmigrate remote-dst-status
   ./vmigrate remote-dst-close
@@ -1448,12 +1449,12 @@ create_bitmap(){
 
   out="$(qmp '{"execute":"block-dirty-bitmap-add","arguments":{"node":"'"$QEMU_NODE"'","name":"'"$BITMAP"'"}}')"
 
-  printf '%s\n' "$out"
-
   if printf '%s\n' "$out" | grep -q '"error"'; then
+    printf '%s\n' "$out"
     die "block-dirty-bitmap-add failed"
   fi
 
+  ok "Bitmap created: $BITMAP"
   verify_bitmap
 }
 
@@ -1675,9 +1676,8 @@ backup_job(){
       ;;
   esac
 
-  printf '%s\n' "$out"
-
   if printf '%s\n' "$out" | grep -q '"error"'; then
+    printf '%s\n' "$out"
     die "$method failed"
   fi
 }
@@ -2138,6 +2138,262 @@ archive_report(){
   ok "Archived report: $file"
 }
 
+summary_file(){
+  [[ -n "${RUN_DIR:-}" ]] || return 1
+  printf '%s/summary.txt\n' "$RUN_DIR"
+}
+
+summary_set(){
+  local key="$1" val="$2" file tmp
+  file="$(summary_file)" || return 0
+  mkdir -p "$(dirname "$file")"
+  tmp="$(mktemp)"
+  [[ -f "$file" ]] && grep -v -E "^${key}=" "$file" > "$tmp" || true
+  printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$file"
+}
+
+summary_init(){
+  local vm="$1" target_id="$2" target_host="$3" batch_id="${4:-}"
+  summary_set VM "$vm"
+  summary_set RUN_ID "${RUN_ID:-}"
+  summary_set RUN_DIR "${RUN_DIR:-}"
+  summary_set TARGET_ID "$target_id"
+  summary_set TARGET_HOST "$target_host"
+  summary_set BATCH_ID "$batch_id"
+  summary_set START_TIME "$(now_ts)"
+  summary_set START_EPOCH "$(date +%s)"
+  summary_set RESULT "RUNNING"
+  summary_set FULL_STATUS "PENDING"
+  summary_set VERIFY "NOT_RUN"
+  summary_set FINAL_STATUS "PENDING"
+}
+
+summary_finish(){
+  local result="$1" full_status="${2:-}" end_epoch start_epoch duration
+  end_epoch="$(date +%s)"
+  start_epoch="$(awk -F= '$1=="START_EPOCH"{print $2; exit}' "$(summary_file 2>/dev/null)" 2>/dev/null || true)"
+  [[ "$start_epoch" =~ ^[0-9]+$ ]] || start_epoch="$end_epoch"
+  duration=$(( end_epoch - start_epoch ))
+
+  summary_set END_TIME "$(now_ts)"
+  summary_set END_EPOCH "$end_epoch"
+  summary_set DURATION_SECONDS "$duration"
+  summary_set DURATION "$(format_duration "$duration")"
+  summary_set RESULT "$result"
+  [[ -n "$full_status" ]] && summary_set FULL_STATUS "$full_status"
+}
+
+batch_run_dir(){
+  local batch_id="$1"
+  printf '%s/batches/%s\n' "${VMIGRATE_RUNS_DIR:-${SCRIPT_DIR}/migrations}" "$batch_id"
+}
+
+batch_write_line(){
+  local batch_dir="$1" line="$2"
+  mkdir -p "$batch_dir"
+  printf '%s\n' "$line" >> "$batch_dir/summary.txt"
+}
+
+batch_remote_kill_nbd_port(){
+  local port="${NBD_PORT:-10809}" host="${TARGET_HOST:-}" ssh_port="${SSH_PORT:-22}" ssh_user="${SSH_USER:-root}"
+  [[ -n "$host" ]] || return 0
+  warn "Checking stale remote qemu-nbd on ${host}:${port}"
+
+  ssh -p "$ssh_port" -o BatchMode=yes -o ConnectTimeout=10 "${ssh_user}@${host}" "sh -c '
+    line=\$(ss -lntp 2>/dev/null | grep \"127.0.0.1:${port}\" | grep qemu-nbd | head -n1 || true)
+    [ -n \"\$line\" ] || exit 0
+    pid=\$(printf \"%s\n\" \"\$line\" | sed -n \"s/.*pid=\\([0-9][0-9]*\\).*/\\1/p\" | head -n1)
+    [ -n \"\$pid\" ] || exit 1
+    echo \"Killing stale qemu-nbd pid=\$pid on port ${port}\"
+    kill \"\$pid\" 2>/dev/null || true
+    sleep 1
+    if ss -lntp 2>/dev/null | grep \"127.0.0.1:${port}\" | grep -q qemu-nbd; then
+      kill -9 \"\$pid\" 2>/dev/null || true
+      sleep 1
+    fi
+    ss -lntp 2>/dev/null | grep \"127.0.0.1:${port}\" | grep qemu-nbd && exit 1 || exit 0
+  '" || warn "Could not kill stale remote qemu-nbd on port $port"
+}
+
+batch_prepare_full_one(){
+  local vm="$1" target_id="$2" target_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}" batch_id="${6:-}"
+  [[ -n "$vm" && -n "$target_id" && -n "$target_host" ]] || die "batch entry requires: VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]"
+  case "$target_id" in *[!0-9]*|'') die "Target ID must be numeric: $target_id" ;; esac
+  case "$ssh_port" in *[!0-9]*|'') die "SSH port must be numeric: $ssh_port" ;; esac
+
+  IN_CREATE_WORKFLOW=1
+  start_log "$vm"
+
+  CONFIG_FILE="${RUN_DIR}/config"
+  : > "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+  activate_run_dir "$RUN_DIR"
+
+  summary_init "$vm" "$target_id" "$target_host" "$batch_id"
+  trap 'summary_finish "FAILED" "FAILED"' ERR
+
+  cat <<EOF
+vmigrate batch-full item
+------------------------
+Source VM        : $vm
+Target ID        : $target_id
+Target host      : $target_host
+SSH              : ${ssh_user}@${target_host}:${ssh_port}
+Run directory    : $RUN_DIR
+EOF
+
+  remote_prepare "$vm" "$target_host" "$target_id" "$ssh_port" "$ssh_user" 0
+  archive_config_snapshot
+  preflight
+
+  write_key BACKUP_METHOD drive-backup
+  load_config
+
+  # Ensure batch cleanup helpers use the batch connection settings.
+  TARGET_HOST="$target_host"
+  SSH_PORT="$ssh_port"
+  SSH_USER="$ssh_user"
+
+  # Batch mode is non-interactive. Clean stale tunnel/export for this run and retry once.
+  tunnel_stop || true
+  remote_dst_close || true
+  batch_remote_kill_nbd_port || true
+
+  remote_export || {
+    warn "remote-export failed. Trying stale export cleanup and retrying once..."
+    tunnel_stop || true
+    remote_dst_close || true
+    batch_remote_kill_nbd_port || true
+    remote_export
+  }
+
+  start_tunnel
+  tunnel_check || die "NBD metadata check failed. Fix tunnel/export before migration."
+
+  create_bitmap
+  check_bitmap
+  archive_report "report.pre-full"
+
+  if ! block_jobs_empty; then
+    warn "Existing block job found before FULL sync."
+    jobs_cmd
+    warn "Trying to dismiss concluded/stale jobs before FULL sync."
+    jobs_dismiss_all
+    if ! block_jobs_empty; then
+      jobs_cmd
+      die "A block job is still present. Resolve it before starting FULL sync."
+    fi
+  fi
+
+  full_sync
+  wait_full
+  archive_report "report.after-full"
+
+  summary_finish "SUCCESS" "AFTER_FULL"
+  trap - ERR
+
+  # Batch mode must free the common port/export before moving to the next VM.
+  # This does not remove the bitmap or any migrated data.
+  tunnel_stop || warn "Tunnel stop failed or no tunnel found."
+  remote_dst_close || warn "Remote NBD close failed or no export found."
+
+  ok "Batch FULL completed for $vm"
+}
+
+batch_full(){
+  local file="${1:-}" batch_id batch_dir line vm target_id target_host ssh_port ssh_user idx=0 ok_count=0 fail_count=0 skip_count=0 rc
+  [[ -n "$file" ]] || die "Usage: ./vmigrate batch-full BATCH_FILE"
+  [[ -f "$file" ]] || die "Batch file not found: $file"
+
+  batch_id="$(date '+%Y%m%d-%H%M%S')"
+  batch_dir="$(batch_run_dir "$batch_id")"
+  mkdir -p "$batch_dir"
+  cp -a "$file" "$batch_dir/batch.txt"
+
+  {
+    echo "BATCH_ID=$batch_id"
+    echo "START_TIME=$(now_ts)"
+    echo "BATCH_FILE=$file"
+    echo
+  } > "$batch_dir/summary.txt"
+
+  ok "Batch directory: $batch_dir"
+
+  set +e
+  exec 3< "$file"
+  while IFS= read -r line <&3 || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="$(printf '%s' "$line" | awk '{$1=$1; print}')"
+    [[ -n "$line" ]] || continue
+
+    idx=$((idx + 1))
+    set -- $line
+    vm="${1:-}"
+    target_id="${2:-}"
+    target_host="${3:-}"
+    ssh_port="${4:-22}"
+    ssh_user="${5:-root}"
+
+    if [[ -z "$vm" || -z "$target_id" || -z "$target_host" ]]; then
+      warn "Skipping invalid batch line $idx: $line"
+      batch_write_line "$batch_dir" "ITEM_$idx=SKIPPED invalid-line"
+      skip_count=$((skip_count + 1))
+      continue
+    fi
+
+    echo
+    echo "[$idx] $vm -> target $target_id"
+    echo "--------------------------------"
+
+    RUN_ID="${batch_id}-${idx}"
+    run_dir="${VMIGRATE_RUNS_DIR:-${SCRIPT_DIR}/migrations}/$(sanitize_name "$vm")/${RUN_ID}"
+
+    set +e
+    (
+      set +e
+      RUN_ID="$RUN_ID"
+      VMIGRATE_LOG="${VMIGRATE_LOG:-1}"
+      batch_prepare_full_one "$vm" "$target_id" "$target_host" "$ssh_port" "$ssh_user" "$batch_id"
+      exit $?
+    ) < /dev/null
+    rc=$?
+    set +e
+
+    if [[ "$rc" -eq 0 ]]; then
+      ok "Batch item completed: $vm"
+      batch_write_line "$batch_dir" "$vm $RUN_ID SUCCESS $run_dir"
+      ok_count=$((ok_count + 1))
+    else
+      warn "Batch item failed: $vm"
+      batch_write_line "$batch_dir" "$vm $RUN_ID FAILED rc=$rc $run_dir"
+      fail_count=$((fail_count + 1))
+      continue
+    fi
+  done
+  exec 3<&-
+  set -e
+
+  {
+    echo
+    echo "END_TIME=$(now_ts)"
+    echo "SUCCESS_COUNT=$ok_count"
+    echo "FAILED_COUNT=$fail_count"
+    echo "SKIPPED_COUNT=$skip_count"
+  } >> "$batch_dir/summary.txt"
+
+  echo
+  echo "Batch finished"
+  echo "--------------"
+  echo "Success : $ok_count"
+  echo "Failed  : $fail_count"
+  echo "Skipped : $skip_count"
+  echo "Summary : $batch_dir/summary.txt"
+
+  [[ "$fail_count" -eq 0 ]]
+}
+
+
 create_workflow(){
   local vm="$1" target_id="$2" target_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}"
 
@@ -2174,7 +2430,18 @@ EOF
   write_key BACKUP_METHOD drive-backup
   load_config
 
-  remote_export
+  # Batch mode is non-interactive. If a previous export/tunnel was left open
+  # for the same run/config, clean it safely and retry instead of failing.
+  tunnel_stop || true
+  remote_dst_close || true
+
+  remote_export || {
+    warn "remote-export failed. Trying stale export cleanup and retrying once..."
+    tunnel_stop || true
+    remote_dst_close || true
+    remote_export
+  }
+
   start_tunnel
   tunnel_check || die "NBD metadata check failed. Fix tunnel/export before migration."
 
@@ -2304,6 +2571,7 @@ case "$cmd" in
   apply-handoff) apply_handoff "${1:-}" ;;
   remote-prepare) remote_prepare "${1:-}" "${3:-}" "${2:-}" "${4:-22}" "${5:-root}" ;;
   create) create_workflow "${1:-}" "${2:-}" "${3:-}" "${4:-22}" "${5:-root}" ;;
+  batch-full) batch_full "${1:-}" ;;
   remote-export) remote_export ;;
   remote-dst-status) remote_dst_status ;;
   remote-dst-close) remote_dst_close ;;
