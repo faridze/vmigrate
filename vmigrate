@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.8"
+VERSION="0.4.9"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2211,6 +2211,7 @@ batch_prepare_full_one(){
   activate_run_dir "$RUN_DIR"
 
   summary_init "$vm" "$target_id" "$target_host" "$batch_id"
+  trap 'summary_finish "FAILED" "FAILED"' ERR
 
   cat <<EOF
 vmigrate batch-full item
@@ -2253,6 +2254,7 @@ EOF
   archive_report "report.after-full"
 
   summary_finish "SUCCESS" "AFTER_FULL"
+  trap - ERR
 
   # Batch mode must free the common port/export before moving to the next VM.
   # This does not remove the bitmap or any migrated data.
@@ -2384,7 +2386,18 @@ EOF
   write_key BACKUP_METHOD drive-backup
   load_config
 
-  remote_export
+  # Batch mode is non-interactive. If a previous export/tunnel was left open
+  # for the same run/config, clean it safely and retry instead of failing.
+  tunnel_stop || true
+  remote_dst_close || true
+
+  remote_export || {
+    warn "remote-export failed. Trying stale export cleanup and retrying once..."
+    tunnel_stop || true
+    remote_dst_close || true
+    remote_export
+  }
+
   start_tunnel
   tunnel_check || die "NBD metadata check failed. Fix tunnel/export before migration."
 
