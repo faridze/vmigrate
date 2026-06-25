@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.19"
+VERSION="0.4.20"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -1500,7 +1500,8 @@ jobs_cmd(){
   load_config
   local out
   if ! out="$(block_jobs_json 2>/dev/null)"; then
-    warn "QMP query timed out"
+    warn "Unable to query QMP job status."
+    warn "VM may be stopped/suspended or QMP is not responding."
     return 1
   fi
   printf '%s\n' "$out"
