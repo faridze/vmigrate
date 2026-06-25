@@ -1755,7 +1755,6 @@ wait_full(){
   wait_jobs_empty
   mark_full_completed
   ok "Full sync marked completed: $(state_file)"
-  prompt_sample_verify
 }
 
 incremental_sync(){
