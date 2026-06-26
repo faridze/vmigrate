@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.31"
+VERSION="0.4.32"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -1938,6 +1938,11 @@ Total read : $(format_bytes "$compared_bytes")
 EOF
 
   start_ts="$(date +%s)"
+  summary_set VERIFY "RUNNING"
+  summary_set VERIFY_AT "$(now_ts)"
+  summary_set VERIFY_SAMPLES "$samples"
+  summary_set VERIFY_CHUNK_MB "$chunk_mb"
+  summary_set VERIFY_COMPARED_BYTES "$compared_bytes"
 
   for ((i=1; i<=samples; i++)); do
     rnd=$(( (RANDOM << 15) | RANDOM ))
@@ -1969,11 +1974,16 @@ EOF
       failed=1
       summary_set VERIFY "FAIL"
       summary_set VERIFY_OFFSET_MIB "$skip_mb"
+      summary_set VERIFY_LAST_OFFSET_MIB "$skip_mb"
+      summary_set VERIFY_FAILED_SAMPLE "$i"
+      summary_set VERIFY_SOURCE_MD5 "${src_hash:-empty}"
+      summary_set VERIFY_TARGET_MD5 "${target_hash:-empty}"
       summary_set VERIFY_SAMPLES "$samples"
       summary_set VERIFY_CHUNK_MB "$chunk_mb"
       break
     fi
 
+    summary_set VERIFY_LAST_OFFSET_MIB "$skip_mb"
     printf '\r[%d/%d] verified offset=%sMiB' "$i" "$samples" "$skip_mb"
   done
 
@@ -1985,18 +1995,21 @@ EOF
   summary_set VERIFY_CHUNK_MB "$chunk_mb"
   summary_set VERIFY_COMPARED_BYTES "$compared_bytes"
   summary_set VERIFY_ELAPSED_SECONDS "$elapsed"
+  summary_set VERIFY_AT "$(now_ts)"
 
   if [[ "$failed" -eq 0 ]]; then
     summary_set VERIFY "PASS"
     ok "Sample verify PASSED"
     echo "Compared : $(format_bytes "$compared_bytes")"
     echo "Elapsed  : $(format_duration "$elapsed")"
+    echo "Summary  : $(summary_file)"
     return 0
   fi
 
   warn "Sample verify FAILED"
   echo "Compared before fail: up to $(format_bytes "$(( i * chunk_bytes ))")"
   echo "Elapsed             : $(format_duration "$elapsed")"
+  echo "Summary             : $(summary_file)"
   return 1
 }
 
