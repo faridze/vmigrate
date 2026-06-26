@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.37"
+VERSION="0.4.38"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2870,7 +2870,7 @@ for p in \$pids; do \
   if kill -0 \$p 2>/dev/null; then \
     kill -KILL \$p 2>/dev/null || true; \
   fi; \
-done"
+done; exit 0"
 
   remote_ssh "$cmd"
 }
