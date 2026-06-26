@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.27"
+VERSION="0.4.28"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2074,20 +2074,86 @@ watch_jobs(){
   done
 }
 
+
 status(){
   load_config
-  local out
-  virsh domstate "$VM_NAME" || true
-  if out="$(qmp '{"execute":"query-block-jobs"}' 2>/dev/null)"; then
-    printf '%s\n' "$out"
-  else
-    warn "QMP query timed out"
+  state_sync_identity
+
+  local active_dir run_id vm_state full final verify tunnels lock lock_state out jobs_state
+
+  active_dir="$(config_dir)"
+  run_id="${active_dir##*/}"
+
+  full="no"
+  final="no"
+  [[ "$(state_get FULL_COMPLETED)" == "1" ]] && full="yes"
+  [[ "$(state_get FINAL_COMPLETED)" == "1" ]] && final="yes"
+
+  verify="unset"
+  [[ -f "$active_dir/summary.txt" ]] && verify="$(awk -F= '$1=="VERIFY"{print $2; exit}' "$active_dir/summary.txt")"
+  [[ -n "$verify" ]] || verify="unset"
+
+  vm_state="unknown"
+  if command -v virsh >/dev/null 2>&1; then
+    vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
   fi
-  if out="$(qmp '{"execute":"query-block"}' 2>/dev/null)"; then
-    printf '%s\n' "$out" | grep -A20 -B5 "$BITMAP" || true
+
+  tunnels="$(migration_active_tunnels 2>/dev/null || true)"
+  if [[ -n "$tunnels" ]]; then
+    tunnels="$(printf '%s\n' "$tunnels" | awk '{print "running pid=" $1}' | head -n1)"
   else
-    warn "QMP query timed out"
+    tunnels="stopped"
   fi
+
+  lock_state="unlocked"
+  lock="$(lock_path_for_vm "$VM_NAME" 2>/dev/null || true)"
+  if [[ -n "$lock" && -d "$lock" ]]; then
+    local pid
+    pid="$(awk -F= '$1=="PID"{print $2; exit}' "$lock/info" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      lock_state="locked pid=$pid"
+    else
+      lock_state="stale"
+    fi
+  fi
+
+  jobs_state="unknown"
+  if out="$(block_jobs_json 2>/dev/null)"; then
+    if printf '%s\n' "$out" | grep -q '"type"'; then
+      jobs_state="$(printf '%s\n' "$out" | block_jobs_summary | tr '\n' '; ' | sed 's/[; ]*$//')"
+    elif printf '%s\n' "$out" | grep -q '"error"'; then
+      jobs_state="QMP error"
+    else
+      jobs_state="none"
+    fi
+  else
+    jobs_state="QMP timeout"
+  fi
+
+  cat <<EOF
+Runtime Status
+--------------
+
+VM            : $VM_NAME
+Run           : $run_id
+VM state      : $vm_state
+
+FULL          : $full
+FINAL         : $final
+VERIFY        : $verify
+
+Target        : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}
+Target ID     : $TARGET_ID
+Target disk   : $TARGET_DISK
+NBD           : 127.0.0.1:${NBD_PORT} (${NBD_EXPORT})
+
+Tunnel        : $tunnels
+Block jobs    : $jobs_state
+Lock          : $lock_state
+
+Config        : $CONFIG_FILE
+Run dir       : $active_dir
+EOF
 }
 
 final_cutover_run(){
