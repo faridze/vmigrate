@@ -2944,7 +2944,7 @@ EOF
 
   if [[ "$force" -eq 1 ]]; then
     force_tunnel_stop || warn "Force tunnel cleanup failed"
-    remote_force_kill_qemu_nbd || warn "Force remote qemu-nbd cleanup failed"
+    remote_force_kill_qemu_nbd || warn "Force remote qemu-nbd cleanup returned non-zero; continuing."
   fi
 
   local lock
