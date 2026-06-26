@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.32"
+VERSION="0.4.33"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2721,22 +2721,45 @@ lock_release(){
 }
 
 lock_status(){
-  local base found=0 f pid vm
+  local base found=0 f pid vm start run cmd status age now start_epoch
   base="$(lock_dir)"
   [[ -d "$base" ]] || { echo "No locks."; return 0; }
+
+  printf '%-18s %-8s %-8s %-20s %s\n' "VM" "STATUS" "PID" "AGE" "RUN_DIR"
+
   shopt -s nullglob
+  now="$(date +%s)"
+
   for f in "$base"/*.lock; do
     found=1
-    echo
-    echo "Lock: $f"
-    cat "$f/info" 2>/dev/null || true
+
+    vm="$(awk -F= '$1=="VM"{print $2; exit}' "$f/info" 2>/dev/null || true)"
     pid="$(awk -F= '$1=="PID"{print $2; exit}' "$f/info" 2>/dev/null || true)"
+    start="$(awk -F= '$1=="START_TIME"{print $2; exit}' "$f/info" 2>/dev/null || true)"
+    run="$(awk -F= '$1=="RUN_DIR"{print $2; exit}' "$f/info" 2>/dev/null || true)"
+
+    [[ -n "$vm" ]] || vm="${f##*/}"
+    vm="${vm%.lock}"
+
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      echo "Status=active"
+      status="active"
     else
-      echo "Status=stale"
+      status="stale"
     fi
+
+    age="unknown"
+    if [[ -n "$start" ]]; then
+      start_epoch="$(date -d "$start" +%s 2>/dev/null || true)"
+      if [[ -n "$start_epoch" && "$start_epoch" =~ ^[0-9]+$ ]]; then
+        age="$(format_duration "$(( now - start_epoch ))")"
+      fi
+    fi
+
+    [[ -n "$run" ]] || run="-"
+
+    printf '%-18s %-8s %-8s %-20s %s\n' "$vm" "$status" "${pid:-"-"}" "$age" "$run"
   done
+
   shopt -u nullglob
   (( found )) || echo "No locks."
 }
