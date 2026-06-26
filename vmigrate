@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.27"
+VERSION="0.4.38"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -57,7 +57,7 @@ Usage:
   ./vmigrate init
   ./vmigrate show
   ./vmigrate list
-  ./vmigrate history
+  ./vmigrate history [VM_NAME] [--latest] [--failed]
   ./vmigrate active
   ./vmigrate use VM_NAME RUN_ID
   ./vmigrate use RUN_DIR
@@ -104,8 +104,9 @@ Usage:
   ./vmigrate verify [SAMPLES]
   ./vmigrate verify-sample [SAMPLES]
   ./vmigrate cleanup
-  ./vmigrate cleanup-stale
+  ./vmigrate cleanup-stale [--force]
   ./vmigrate lock-status
+  ./vmigrate unlock-stale
   ./vmigrate stop-source
 
 Recommended first run:
@@ -1938,6 +1939,11 @@ Total read : $(format_bytes "$compared_bytes")
 EOF
 
   start_ts="$(date +%s)"
+  summary_set VERIFY "RUNNING"
+  summary_set VERIFY_AT "$(now_ts)"
+  summary_set VERIFY_SAMPLES "$samples"
+  summary_set VERIFY_CHUNK_MB "$chunk_mb"
+  summary_set VERIFY_COMPARED_BYTES "$compared_bytes"
 
   for ((i=1; i<=samples; i++)); do
     rnd=$(( (RANDOM << 15) | RANDOM ))
@@ -1969,11 +1975,16 @@ EOF
       failed=1
       summary_set VERIFY "FAIL"
       summary_set VERIFY_OFFSET_MIB "$skip_mb"
+      summary_set VERIFY_LAST_OFFSET_MIB "$skip_mb"
+      summary_set VERIFY_FAILED_SAMPLE "$i"
+      summary_set VERIFY_SOURCE_MD5 "${src_hash:-empty}"
+      summary_set VERIFY_TARGET_MD5 "${target_hash:-empty}"
       summary_set VERIFY_SAMPLES "$samples"
       summary_set VERIFY_CHUNK_MB "$chunk_mb"
       break
     fi
 
+    summary_set VERIFY_LAST_OFFSET_MIB "$skip_mb"
     printf '\r[%d/%d] verified offset=%sMiB' "$i" "$samples" "$skip_mb"
   done
 
@@ -1985,18 +1996,21 @@ EOF
   summary_set VERIFY_CHUNK_MB "$chunk_mb"
   summary_set VERIFY_COMPARED_BYTES "$compared_bytes"
   summary_set VERIFY_ELAPSED_SECONDS "$elapsed"
+  summary_set VERIFY_AT "$(now_ts)"
 
   if [[ "$failed" -eq 0 ]]; then
     summary_set VERIFY "PASS"
     ok "Sample verify PASSED"
     echo "Compared : $(format_bytes "$compared_bytes")"
     echo "Elapsed  : $(format_duration "$elapsed")"
+    echo "Summary  : $(summary_file)"
     return 0
   fi
 
   warn "Sample verify FAILED"
   echo "Compared before fail: up to $(format_bytes "$(( i * chunk_bytes ))")"
   echo "Elapsed             : $(format_duration "$elapsed")"
+  echo "Summary             : $(summary_file)"
   return 1
 }
 
@@ -2074,20 +2088,86 @@ watch_jobs(){
   done
 }
 
+
 status(){
   load_config
-  local out
-  virsh domstate "$VM_NAME" || true
-  if out="$(qmp '{"execute":"query-block-jobs"}' 2>/dev/null)"; then
-    printf '%s\n' "$out"
-  else
-    warn "QMP query timed out"
+  state_sync_identity
+
+  local active_dir run_id vm_state full final verify tunnels lock lock_state out jobs_state
+
+  active_dir="$(config_dir)"
+  run_id="${active_dir##*/}"
+
+  full="no"
+  final="no"
+  [[ "$(state_get FULL_COMPLETED)" == "1" ]] && full="yes"
+  [[ "$(state_get FINAL_COMPLETED)" == "1" ]] && final="yes"
+
+  verify="unset"
+  [[ -f "$active_dir/summary.txt" ]] && verify="$(awk -F= '$1=="VERIFY"{print $2; exit}' "$active_dir/summary.txt")"
+  [[ -n "$verify" ]] || verify="unset"
+
+  vm_state="unknown"
+  if command -v virsh >/dev/null 2>&1; then
+    vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
   fi
-  if out="$(qmp '{"execute":"query-block"}' 2>/dev/null)"; then
-    printf '%s\n' "$out" | grep -A20 -B5 "$BITMAP" || true
+
+  tunnels="$(migration_active_tunnels 2>/dev/null || true)"
+  if [[ -n "$tunnels" ]]; then
+    tunnels="$(printf '%s\n' "$tunnels" | awk '{print "running pid=" $1}' | head -n1)"
   else
-    warn "QMP query timed out"
+    tunnels="stopped"
   fi
+
+  lock_state="unlocked"
+  lock="$(lock_path_for_vm "$VM_NAME" 2>/dev/null || true)"
+  if [[ -n "$lock" && -d "$lock" ]]; then
+    local pid
+    pid="$(awk -F= '$1=="PID"{print $2; exit}' "$lock/info" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      lock_state="locked pid=$pid"
+    else
+      lock_state="stale"
+    fi
+  fi
+
+  jobs_state="unknown"
+  if out="$(block_jobs_json 2>/dev/null)"; then
+    if printf '%s\n' "$out" | grep -q '"type"'; then
+      jobs_state="$(printf '%s\n' "$out" | block_jobs_summary | tr '\n' '; ' | sed 's/[; ]*$//')"
+    elif printf '%s\n' "$out" | grep -q '"error"'; then
+      jobs_state="QMP error"
+    else
+      jobs_state="none"
+    fi
+  else
+    jobs_state="QMP timeout"
+  fi
+
+  cat <<EOF
+Runtime Status
+--------------
+
+VM            : $VM_NAME
+Run           : $run_id
+VM state      : $vm_state
+
+FULL          : $full
+FINAL         : $final
+VERIFY        : $verify
+
+Target        : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}
+Target ID     : $TARGET_ID
+Target disk   : $TARGET_DISK
+NBD           : 127.0.0.1:${NBD_PORT} (${NBD_EXPORT})
+
+Tunnel        : $tunnels
+Block jobs    : $jobs_state
+Lock          : $lock_state
+
+Config        : $CONFIG_FILE
+Run dir       : $active_dir
+EOF
 }
 
 final_cutover_run(){
@@ -2642,64 +2722,361 @@ lock_release(){
 }
 
 lock_status(){
-  local base found=0 f pid vm
+  local base found=0 f pid vm start run cmd status age now start_epoch
   base="$(lock_dir)"
   [[ -d "$base" ]] || { echo "No locks."; return 0; }
+
+  printf '%-18s %-8s %-8s %-20s %s\n' "VM" "STATUS" "PID" "AGE" "RUN_DIR"
+
   shopt -s nullglob
+  now="$(date +%s)"
+
   for f in "$base"/*.lock; do
     found=1
-    echo
-    echo "Lock: $f"
-    cat "$f/info" 2>/dev/null || true
+
+    vm="$(awk -F= '$1=="VM"{print $2; exit}' "$f/info" 2>/dev/null || true)"
     pid="$(awk -F= '$1=="PID"{print $2; exit}' "$f/info" 2>/dev/null || true)"
+    start="$(awk -F= '$1=="START_TIME"{print $2; exit}' "$f/info" 2>/dev/null || true)"
+    run="$(awk -F= '$1=="RUN_DIR"{print $2; exit}' "$f/info" 2>/dev/null || true)"
+
+    [[ -n "$vm" ]] || vm="${f##*/}"
+    vm="${vm%.lock}"
+
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      echo "Status=active"
+      status="active"
     else
-      echo "Status=stale"
+      status="stale"
     fi
+
+    age="unknown"
+    if [[ -n "$start" ]]; then
+      start_epoch="$(date -d "$start" +%s 2>/dev/null || true)"
+      if [[ -n "$start_epoch" && "$start_epoch" =~ ^[0-9]+$ ]]; then
+        age="$(format_duration "$(( now - start_epoch ))")"
+      fi
+    fi
+
+    [[ -n "$run" ]] || run="-"
+
+    printf '%-18s %-8s %-8s %-20s %s\n' "$vm" "$status" "${pid:-"-"}" "$age" "$run"
   done
+
   shopt -u nullglob
   (( found )) || echo "No locks."
 }
 
+unlock_stale_one(){
+  local lock="$1" name pid
+  [[ -d "$lock" ]] || return 1
+
+  name="${lock##*/}"
+  name="${name%.lock}"
+  pid="$(awk -F= '$1=="PID"{print $2; exit}' "$lock/info" 2>/dev/null || true)"
+
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    warn "Active lock kept: $name (pid $pid)"
+    return 2
+  fi
+
+  rm -rf "$lock"
+  ok "Removed stale lock: $name"
+  return 0
+}
+
+unlock_stale_cmd(){
+  local base f removed=0 active=0 found=0 rc
+  base="$(lock_dir)"
+
+  echo "Scanning locks..."
+  echo
+
+  [[ -d "$base" ]] || {
+    echo "No locks."
+    return 0
+  }
+
+  shopt -s nullglob
+  for f in "$base"/*.lock; do
+    found=1
+    set +e
+    unlock_stale_one "$f"
+    rc=$?
+    set -e
+
+    case "$rc" in
+      0) removed=$((removed+1)) ;;
+      2) active=$((active+1)) ;;
+    esac
+  done
+  shopt -u nullglob
+
+  if [[ "$found" -eq 0 ]]; then
+    echo "No locks."
+    return 0
+  fi
+
+  cat <<EOF
+
+Summary
+-------
+Removed : $removed
+Active  : $active
+EOF
+}
+
+shell_quote(){
+  local s="$1"
+  printf "'%s'" "$(printf '%s' "$s" | sed "s/'/'\\\\''/g")"
+}
+
+force_tunnel_stop(){
+  local pids
+  pids="$(migration_active_tunnels 2>/dev/null | awk '{print $1}' | sort -u || true)"
+  if [[ -z "$pids" ]]; then
+    warn "No matching tunnel process found for force kill."
+    return 0
+  fi
+
+  warn "Force killing local tunnel PID(s): $pids"
+  kill $pids 2>/dev/null || true
+  sleep 1
+
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      warn "Force killing stubborn tunnel PID: $pid"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+remote_force_kill_qemu_nbd(){
+  load_config
+
+  local qdisk qexport cmd
+  qdisk="$(shell_quote "$TARGET_DISK")"
+  qexport="$(shell_quote "$NBD_EXPORT")"
+
+  cmd="pids=\$(ps -eo pid=,args= | grep '[q]emu-nbd' | grep -F -- $qdisk | awk '{print \$1}' | sort -u); \
+if [ -z \"\$pids\" ]; then \
+  pids=\$(ps -eo pid=,args= | grep '[q]emu-nbd' | grep -F -- $qexport | awk '{print \$1}' | sort -u); \
+fi; \
+if [ -z \"\$pids\" ]; then \
+  echo 'No matching remote qemu-nbd process found'; exit 0; \
+fi; \
+echo \"Force killing remote qemu-nbd PID(s): \$pids\"; \
+kill \$pids 2>/dev/null || true; \
+sleep 1; \
+for p in \$pids; do \
+  if kill -0 \$p 2>/dev/null; then \
+    kill -KILL \$p 2>/dev/null || true; \
+  fi; \
+done; exit 0"
+
+  remote_ssh "$cmd"
+}
+
 cleanup_stale(){
   load_config
+
+  local force=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --force) force=1 ;;
+      -h|--help)
+        cat <<EOF
+Usage:
+  ./vmigrate cleanup-stale
+  ./vmigrate cleanup-stale --force
+
+Safe mode:
+  - stop matching local tunnel
+  - close remote export through vmigrate-agent
+  - dismiss concluded QMP jobs
+  - remove stale lock only if PID is dead
+
+Force mode:
+  - everything in safe mode
+  - force kill matching local tunnel PID(s)
+  - force kill remote qemu-nbd matching TARGET_DISK or NBD_EXPORT
+
+Force mode requires typing FORCE.
+EOF
+        return 0
+        ;;
+      *)
+        die "Unknown cleanup-stale option: $arg"
+        ;;
+    esac
+  done
+
   echo "cleanup-stale"
   echo "-------------"
   echo "VM        : $VM_NAME"
   echo "Target    : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}"
   echo "NBD       : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}"
+  echo "Target disk: $TARGET_DISK"
   echo "Run config: $CONFIG_FILE"
   echo
-  echo "This only attempts safe cleanup for the active/current config:"
-  echo "- stop local SSH/autossh tunnel for this NBD port/target"
-  echo "- close remote destination NBD export through vmigrate-agent"
-  echo "- dismiss concluded QMP block jobs"
-  echo "- remove stale local lock for this VM if PID is dead"
-  echo
-  ask_exact "Continue cleanup-stale? Type CLEAN:" "CLEAN" || die "Aborted"
+
+  if [[ "$force" -eq 1 ]]; then
+    warn "FORCE mode enabled."
+    warn "This will kill matching local tunnel processes and remote qemu-nbd processes."
+    echo
+    ask_exact "Continue cleanup-stale --force? Type FORCE:" "FORCE" || die "Aborted"
+  else
+    echo "This only attempts safe cleanup for the active/current config:"
+    echo "- stop local SSH/autossh tunnel for this NBD port/target"
+    echo "- close remote destination NBD export through vmigrate-agent"
+    echo "- dismiss concluded QMP block jobs"
+    echo "- remove stale local lock for this VM if PID is dead"
+    echo
+    ask_exact "Continue cleanup-stale? Type CLEAN:" "CLEAN" || die "Aborted"
+  fi
 
   tunnel_stop || warn "Local tunnel stop failed or no matching tunnel was found."
   remote_dst_close || warn "Remote NBD close failed or no export was found."
-  jobs_dismiss_all || warn "QMP job dismiss failed or no concluded jobs were found."
 
-  local lock pid
+  set +e
+  ( jobs_dismiss_all )
+  local dismiss_rc=$?
+  set -e
+  [[ "$dismiss_rc" -eq 0 ]] || warn "QMP job dismiss failed or timed out; continuing cleanup."
+
+  if [[ "$force" -eq 1 ]]; then
+    force_tunnel_stop || warn "Force tunnel cleanup failed"
+    remote_force_kill_qemu_nbd || warn "Force remote qemu-nbd cleanup returned non-zero; continuing."
+  fi
+
+  local lock
   lock="$(lock_path_for_vm "$VM_NAME")"
   if [[ -d "$lock" ]]; then
-    pid="$(awk -F= '$1=="PID"{print $2; exit}' "$lock/info" 2>/dev/null || true)"
-    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
-      rm -rf "$lock"
-      ok "Removed stale lock: $lock"
-    else
-      warn "Lock is active, not removed: $lock"
-    fi
+    unlock_stale_one "$lock" || true
   fi
 
   ok "cleanup-stale completed"
 }
 
 history_cmd(){
-  runs_list
+  local filter_vm="" mode="latest" arg base found=0 shown=0
+
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+    case "$arg" in
+      --latest|latest) mode="latest" ;;
+      --all|all) mode="all" ;;
+      --failed|failed) mode="failed" ;;
+      -h|--help)
+        cat <<EOF
+Usage:
+  ./vmigrate history
+  ./vmigrate history --latest
+  ./vmigrate history --all
+  ./vmigrate history --failed
+
+  ./vmigrate history VM_NAME
+  ./vmigrate history VM_NAME --all
+  ./vmigrate history VM_NAME --failed
+
+Aliases:
+  latest, all, failed
+
+Columns:
+  VM, RUN_ID, STATUS, FULL, FINAL, VERIFY, REL_DIR
+EOF
+        return 0
+        ;;
+      *)
+        filter_vm="$arg"
+        ;;
+    esac
+    shift
+  done
+
+  base="$(runs_base_dir)"
+
+  printf '%-18s %-20s %-15s %-5s %-5s %-8s %s\n' "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "VERIFY" "REL_DIR"
+
+  shopt -s nullglob
+
+  if [[ "$mode" == "latest" ]]; then
+    local vmdir dir vm run cfg cfg_vm status full final verify rel_dir state safe_vm
+    for vmdir in "$base"/*; do
+      [[ -d "$vmdir" ]] || continue
+      [[ "${vmdir##*/}" == "batches" ]] && continue
+
+      vm="${vmdir##*/}"
+      [[ -n "$filter_vm" && "$vm" != "$(sanitize_name "$filter_vm")" && "$vm" != "$filter_vm" ]] && continue
+
+      dir="$(ls -1d "$vmdir"/* 2>/dev/null | sort | tail -n1)"
+      [[ -n "$dir" && -d "$dir" ]] || continue
+
+      run="${dir##*/}"
+      cfg="$dir/config"
+      if [[ -f "$cfg" ]]; then
+        cfg_vm="$(run_config_value "$cfg" VM_NAME)"
+        [[ -n "$cfg_vm" ]] && vm="$cfg_vm"
+      fi
+
+      status="$(run_status_for_dir "$dir")"
+      full="no"; final="no"
+      safe_vm="$(sanitize_name "$vm")"
+      state="$dir/.vmigrate-state-$safe_vm"
+      [[ "$(state_get_from_file "$state" FULL_COMPLETED)" == "1" ]] && full="yes"
+      [[ "$(state_get_from_file "$state" FINAL_COMPLETED)" == "1" ]] && final="yes"
+
+      verify="NOT_RUN"
+      [[ -f "$dir/summary.txt" ]] && verify="$(awk -F= '$1=="VERIFY"{print $2; exit}' "$dir/summary.txt")"
+      [[ -n "$verify" ]] || verify="NOT_RUN"
+
+      rel_dir="migrations/${dir#"$base"/}"
+      printf '%-18s %-20s %-15s %-5s %-5s %-8s %s\n' "$vm" "$run" "$status" "$full" "$final" "$verify" "$rel_dir"
+      shown=$((shown+1))
+    done
+    shopt -u nullglob
+    (( shown )) || warn "No matching migration runs found."
+    return 0
+  fi
+
+  local dir vm run cfg cfg_vm status full final verify rel_dir state safe_vm
+  for dir in "$base"/*/*; do
+    [[ -d "$dir" ]] || continue
+    case "$dir" in "$base"/batches/*) continue ;; esac
+    found=1
+
+    vm="${dir%/*}"
+    vm="${vm##*/}"
+    run="${dir##*/}"
+    cfg="$dir/config"
+
+    if [[ -f "$cfg" ]]; then
+      cfg_vm="$(run_config_value "$cfg" VM_NAME)"
+      [[ -n "$cfg_vm" ]] && vm="$cfg_vm"
+    fi
+
+    [[ -n "$filter_vm" && "$vm" != "$filter_vm" && "$(sanitize_name "$vm")" != "$(sanitize_name "$filter_vm")" ]] && continue
+
+    status="$(run_status_for_dir "$dir")"
+    full="no"; final="no"
+    safe_vm="$(sanitize_name "$vm")"
+    state="$dir/.vmigrate-state-$safe_vm"
+    [[ "$(state_get_from_file "$state" FULL_COMPLETED)" == "1" ]] && full="yes"
+    [[ "$(state_get_from_file "$state" FINAL_COMPLETED)" == "1" ]] && final="yes"
+
+    verify="NOT_RUN"
+    [[ -f "$dir/summary.txt" ]] && verify="$(awk -F= '$1=="VERIFY"{print $2; exit}' "$dir/summary.txt")"
+    [[ -n "$verify" ]] || verify="NOT_RUN"
+
+    if [[ "$mode" == "failed" ]]; then
+      [[ "$status" == *failed* || "$verify" == "FAIL" ]] || continue
+    fi
+
+    rel_dir="migrations/${dir#"$base"/}"
+    printf '%-18s %-20s %-15s %-5s %-5s %-8s %s\n' "$vm" "$run" "$status" "$full" "$final" "$verify" "$rel_dir"
+    shown=$((shown+1))
+  done
+
+  shopt -u nullglob
+  (( shown )) || warn "No matching migration runs found."
 }
 
 create_workflow(){
@@ -2877,7 +3254,7 @@ case "$cmd" in
   discover) discover "$@" ;;
   show) show_config ;;
   list) runs_list ;;
-  history) history_cmd ;;
+  history) history_cmd "$@" ;;
   active) run_active ;;
   use) run_use "${1:-}" "${2:-}" ;;
   env) run_env "${1:-}" "${2:-}" ;;
@@ -2921,8 +3298,9 @@ case "$cmd" in
   verify) sample_verify "${1:-64}" ;;
   verify-sample) sample_verify "${1:-64}" ;;
   cleanup) cleanup ;;
-  cleanup-stale) cleanup_stale ;;
+  cleanup-stale) cleanup_stale "$@" ;;
   lock-status) lock_status ;;
+  unlock-stale) unlock_stale_cmd ;;
   stop-source) stop_source ;;
   -h|--help|help|"") usage ;;
   *) usage; die "Unknown command: $cmd" ;;
