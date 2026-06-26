@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.35"
+VERSION="0.4.36"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2935,7 +2935,12 @@ EOF
 
   tunnel_stop || warn "Local tunnel stop failed or no matching tunnel was found."
   remote_dst_close || warn "Remote NBD close failed or no export was found."
-  jobs_dismiss_all || warn "QMP job dismiss failed or no concluded jobs were found."
+
+  set +e
+  jobs_dismiss_all
+  local dismiss_rc=$?
+  set -e
+  [[ "$dismiss_rc" -eq 0 ]] || warn "QMP job dismiss failed or timed out; continuing cleanup."
 
   if [[ "$force" -eq 1 ]]; then
     force_tunnel_stop || warn "Force tunnel cleanup failed"
