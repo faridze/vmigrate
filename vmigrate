@@ -72,6 +72,7 @@ Usage:
   ./vmigrate remote-dst-status
   ./vmigrate remote-dst-close
   ./vmigrate remote-run-check
+  ./vmigrate set-nbd-port PORT
   ./vmigrate quick [HANDOFF_TOKEN]
   ./vmigrate quick [VM_NAME] [HANDOFF_TOKEN]
   ./vmigrate next
@@ -953,6 +954,35 @@ remote_dst_close(){
   need ssh
   remote_context
   remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent close"
+}
+
+set_nbd_port(){
+  local port="${1:-}"
+  [[ -n "$port" ]] || die "Usage: ./vmigrate set-nbd-port PORT"
+  case "$port" in *[!0-9]*|'') die "NBD port must be numeric" ;; esac
+  (( port >= 1024 && port <= 65535 )) || die "NBD port must be between 1024 and 65535"
+
+  load_config
+  need ssh
+
+  local rdir
+  rdir="$(remote_dir)"
+
+  echo "Set per-run NBD port"
+  echo "--------------------"
+  remote_context
+  echo
+  warn "This changes only the active run config and its remote per-run vmigrate.env."
+  warn "It does not enable parallel migration automatically."
+
+  write_key NBD_PORT "$port"
+  NBD_PORT="$port"
+
+  remote_ssh "cd '$rdir' && test -f vmigrate.env && awk -v v='$port' 'BEGIN{done=0} /^NBD_PORT=/{print \"NBD_PORT=\" v; done=1; next} {print} END{if(!done) print \"NBD_PORT=\" v}' vmigrate.env > vmigrate.env.tmp && mv vmigrate.env.tmp vmigrate.env && chmod 600 vmigrate.env" || die "Could not update remote vmigrate.env NBD_PORT"
+
+  ok "NBD_PORT updated for active run: $port"
+  echo
+  remote_run_check
 }
 
 remote_run_check(){
@@ -3376,6 +3406,7 @@ case "$cmd" in
   remote-dst-status) remote_dst_status ;;
   remote-dst-close) remote_dst_close ;;
   remote-run-check) remote_run_check ;;
+  set-nbd-port) set_nbd_port "${1:-}" ;;
   quick) quick_start "${1:-}" "${2:-}" ;;
   next) next_steps ;;
   doctor) preflight ;;
