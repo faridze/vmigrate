@@ -105,6 +105,7 @@ Usage:
   ./vmigrate verify-sample [SAMPLES]
   ./vmigrate cleanup
   ./vmigrate cleanup-stale [--force]
+  ./vmigrate cleanup-remote-runs --dry-run
   ./vmigrate lock-status
   ./vmigrate unlock-stale
   ./vmigrate stop-source
@@ -946,6 +947,30 @@ remote_dst_close(){
   need ssh
   remote_context
   remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent close"
+}
+
+cleanup_remote_runs(){
+  local mode="${1:-}"
+  [[ "$mode" == "--dry-run" ]] || die "Usage: ./vmigrate cleanup-remote-runs --dry-run"
+
+  load_config
+  need ssh
+
+  echo "Remote run cleanup dry-run"
+  echo "--------------------------"
+  remote_context
+  echo
+  echo "Remote run directories:"
+  remote_ssh "sh -c 'if [ -d /root/vmigrate/runs ]; then find /root/vmigrate/runs -mindepth 1 -maxdepth 1 -type d -printf "%p\\n" | sort; else echo "No /root/vmigrate/runs directory"; fi'" | while IFS= read -r dir; do
+    if [[ "$dir" == "$REMOTE_RUN_DIR" ]]; then
+      echo "KEEP   $dir"
+    else
+      echo "OLD    $dir"
+    fi
+  done
+
+  echo
+  warn "Dry-run only. Nothing was deleted."
 }
 
 qmp(){ local json="$1"; timeout "${QMP_TIMEOUT:-20}" virsh qemu-monitor-command "$VM_NAME" --pretty "$json"; }
@@ -3327,6 +3352,7 @@ case "$cmd" in
   verify-sample) sample_verify "${1:-64}" ;;
   cleanup) cleanup ;;
   cleanup-stale) cleanup_stale "$@" ;;
+  cleanup-remote-runs) cleanup_remote_runs "$@" ;;
   lock-status) lock_status ;;
   unlock-stale) unlock_stale_cmd ;;
   stop-source) stop_source ;;
