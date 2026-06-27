@@ -560,6 +560,7 @@ Target node    : $TARGET_NODE
 Target         : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}
 Target ID      : $TARGET_ID
 Target disk    : $TARGET_DISK
+Remote run dir : ${REMOTE_RUN_DIR:-/root/vmigrate}
 NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 Tunnel mode    : $TUNNEL_MODE
 Backup method  : ${BACKUP_METHOD:-drive-backup}
