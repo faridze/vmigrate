@@ -852,23 +852,8 @@ remote_prepare(){
   info "Creating remote workspace: $rdir"
   remote_ssh "mkdir -p '$rdir'" || die "Could not create remote workspace: $rdir"
 
-  local local_agent_version remote_agent_version copy_agent=0
-  local_agent_version="$("$dst_script" version 2>/dev/null || true)"
-  remote_agent_version="$(remote_ssh "if [ -x '$rdir/vmigrate-agent' ]; then cd '$rdir' && ./vmigrate-agent version 2>/dev/null; fi" 2>/dev/null || true)"
-
-  if [[ -z "$remote_agent_version" ]]; then
-    info "Copying destination helper: missing or no version"
-    copy_agent=1
-  elif [[ "$remote_agent_version" != "$local_agent_version" ]]; then
-    info "Copying destination helper: version mismatch remote=[$remote_agent_version] local=[$local_agent_version]"
-    copy_agent=1
-  else
-    ok "Destination helper is current: $remote_agent_version"
-  fi
-
-  if [[ "$copy_agent" == "1" ]]; then
-    scp -P "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$dst_script" "${TARGET_SSH_USER}@${TARGET_HOST}:${rdir}/vmigrate-agent" || die "Could not copy destination helper"
-  fi
+  info "Copying destination helper"
+  scp -P "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$dst_script" "${TARGET_SSH_USER}@${TARGET_HOST}:${rdir}/vmigrate-agent" || die "Could not copy destination helper"
   remote_ssh "chmod +x '$rdir/vmigrate-agent'" || die "Could not make destination helper executable"
 
   info "Discovering target ID $TARGET_ID"
