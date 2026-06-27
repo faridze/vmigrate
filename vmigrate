@@ -896,9 +896,22 @@ remote_export_once(){
   remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent doctor && ${env_prefix}./vmigrate-agent export && ./vmigrate-agent status"
 }
 
+remote_nbd_port_free_check(){
+  local hit
+  info "Checking remote NBD port ${NBD_PORT}"
+  hit="$(remote_ssh "ss -lnt 2>/dev/null | awk '{print \$4}' | grep -E '(^|:)${NBD_PORT}$' || true")" || true
+  if [[ -n "$hit" ]]; then
+    echo "$hit"
+    die "Remote NBD port ${NBD_PORT} is already listening on destination. Run remote-dst-close or choose another per-run port with set-nbd-port."
+  fi
+  ok "Remote NBD port is free: ${NBD_PORT}"
+}
+
 remote_export(){
   load_config
   need ssh
+
+  remote_nbd_port_free_check
 
   local out rc attempt allow_stop=0 did_cleanup=0
 
