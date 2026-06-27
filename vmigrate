@@ -71,6 +71,7 @@ Usage:
   ./vmigrate remote-export
   ./vmigrate remote-dst-status
   ./vmigrate remote-dst-close
+  ./vmigrate remote-run-check
   ./vmigrate quick [HANDOFF_TOKEN]
   ./vmigrate quick [VM_NAME] [HANDOFF_TOKEN]
   ./vmigrate next
@@ -950,6 +951,48 @@ remote_dst_close(){
   need ssh
   remote_context
   remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent close"
+}
+
+remote_run_check(){
+  load_config
+  need ssh
+
+  local rdir out rt_id rt_disk rt_port rt_export mismatch=0
+  rdir="$(remote_dir)"
+
+  echo "Remote run check"
+  echo "----------------"
+  remote_context
+  echo
+
+  out="$(remote_ssh "cd '$rdir' && if [ -f vmigrate.env ]; then cat vmigrate.env; else echo '__MISSING_ENV__'; fi")" || die "Could not read remote vmigrate.env"
+
+  if printf '%s\n' "$out" | grep -q '^__MISSING_ENV__$'; then
+    die "Remote env missing: $rdir/vmigrate.env"
+  fi
+
+  rt_id="$(printf '%s\n' "$out" | awk -F= '$1=="TARGET_ID"{print substr($0,index($0,"=")+1); exit}')"
+  rt_disk="$(printf '%s\n' "$out" | awk -F= '$1=="TARGET_DISK"{print substr($0,index($0,"=")+1); exit}')"
+  rt_port="$(printf '%s\n' "$out" | awk -F= '$1=="NBD_PORT"{print substr($0,index($0,"=")+1); exit}')"
+  rt_export="$(printf '%s\n' "$out" | awk -F= '$1=="NBD_EXPORT"{print substr($0,index($0,"=")+1); exit}')"
+
+  echo "Compare local vs remote env"
+  echo "---------------------------"
+  printf 'TARGET_ID   local=%s remote=%s\n' "$TARGET_ID" "${rt_id:-}"
+  printf 'TARGET_DISK local=%s remote=%s\n' "$TARGET_DISK" "${rt_disk:-}"
+  printf 'NBD_PORT    local=%s remote=%s\n' "$NBD_PORT" "${rt_port:-}"
+  printf 'NBD_EXPORT  local=%s remote=%s\n' "$NBD_EXPORT" "${rt_export:-}"
+
+  [[ "$TARGET_ID" == "${rt_id:-}" ]] || mismatch=1
+  [[ "$TARGET_DISK" == "${rt_disk:-}" ]] || mismatch=1
+  [[ "$NBD_PORT" == "${rt_port:-}" ]] || mismatch=1
+  [[ "$NBD_EXPORT" == "${rt_export:-}" ]] || mismatch=1
+
+  if [[ "$mismatch" == "0" ]]; then
+    ok "Remote run env matches local config"
+  else
+    die "Remote run env mismatch"
+  fi
 }
 
 cleanup_remote_runs(){
@@ -3330,6 +3373,7 @@ case "$cmd" in
   remote-export) remote_export ;;
   remote-dst-status) remote_dst_status ;;
   remote-dst-close) remote_dst_close ;;
+  remote-run-check) remote_run_check ;;
   quick) quick_start "${1:-}" "${2:-}" ;;
   next) next_steps ;;
   doctor) preflight ;;
