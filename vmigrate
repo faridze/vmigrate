@@ -72,7 +72,7 @@ Usage:
   ./vmigrate remote-dst-status
   ./vmigrate remote-dst-close
   ./vmigrate remote-run-check
-  ./vmigrate resume
+  ./vmigrate resume [--run]
   ./vmigrate set-nbd-port PORT
   ./vmigrate quick [HANDOFF_TOKEN]
   ./vmigrate quick [VM_NAME] [HANDOFF_TOKEN]
@@ -1106,6 +1106,9 @@ remote_run_check(){
 }
 
 resume_check(){
+  local mode="${1:-}"
+  [[ -z "$mode" || "$mode" == "--run" ]] || die "Usage: ./vmigrate resume [--run]"
+
   load_config
   state_sync_identity
 
@@ -1213,6 +1216,34 @@ VERIFY        : $verify
 Recommended next step:
   $next
 EOF
+
+  if [[ "$mode" == "--run" ]]; then
+    echo
+    echo "Running recommended safe step..."
+    case "$next" in
+      "./vmigrate remote-run-check") remote_run_check ;;
+      "./vmigrate remote-export") remote_export ;;
+      "./vmigrate tunnel") start_tunnel ;;
+      "./vmigrate attach-target") attach_target ;;
+      "./vmigrate bitmap") create_bitmap ;;
+      "./vmigrate full") full_sync ;;
+      "./vmigrate wait-full") wait_full ;;
+      "./vmigrate incremental") incremental_sync ;;
+      "./vmigrate verify") sample_verify 64 ;;
+      "./vmigrate set-nbd-port PORT")
+        die "Cannot auto-run set-nbd-port without a concrete PORT. Run set-nbd-port auto or set-nbd-port PORT manually."
+        ;;
+      "./vmigrate stop-source"| "./vmigrate final")
+        die "Refusing to auto-run high-risk step: $next. Run it manually after review."
+        ;;
+      "Migration appears complete")
+        ok "Migration appears complete"
+        ;;
+      *)
+        die "Unknown resume next step: $next"
+        ;;
+    esac
+  fi
 }
 
 cleanup_remote_runs(){
@@ -3609,7 +3640,7 @@ case "$cmd" in
   remote-dst-status) remote_dst_status ;;
   remote-dst-close) remote_dst_close ;;
   remote-run-check) remote_run_check ;;
-  resume) resume_check ;;
+  resume) resume_check "$@" ;;
   set-nbd-port) set_nbd_port "${1:-}" ;;
   quick) quick_start "${1:-}" "${2:-}" ;;
   next) next_steps ;;
