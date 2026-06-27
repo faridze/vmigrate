@@ -72,6 +72,7 @@ Usage:
   ./vmigrate remote-dst-status
   ./vmigrate remote-dst-close
   ./vmigrate remote-run-check
+  ./vmigrate resume
   ./vmigrate set-nbd-port PORT
   ./vmigrate quick [HANDOFF_TOKEN]
   ./vmigrate quick [VM_NAME] [HANDOFF_TOKEN]
@@ -1058,6 +1059,116 @@ remote_run_check(){
   else
     die "Remote run env mismatch"
   fi
+}
+
+resume_check(){
+  load_config
+  state_sync_identity
+
+  local active_dir run_id remote_name verify method
+  local remote_env="FAIL" remote_export="CLOSED" tunnel="DOWN" target_node="SKIP" bitmap="MISSING"
+  local full final source_stopped next proc rdir out rt_id rt_disk rt_port rt_export mismatch=0
+
+  active_dir="$(config_dir)"
+  run_id="${active_dir##*/}"
+  rdir="$(remote_dir)"
+  remote_name="${rdir##*/}"
+  method="$(effective_backup_method)"
+
+  full="not completed"
+  final="not completed"
+  source_stopped="no"
+  [[ "$(state_get FULL_COMPLETED)" == "1" ]] && full="completed"
+  [[ "$(state_get FINAL_COMPLETED)" == "1" ]] && final="completed"
+  [[ "$(state_get SOURCE_STOPPED)" == "1" ]] && source_stopped="yes"
+
+  verify="NOT_RUN"
+  [[ -f "$active_dir/summary.txt" ]] && verify="$(awk -F= '$1=="VERIFY"{print $2; exit}' "$active_dir/summary.txt")"
+  [[ -n "$verify" ]] || verify="NOT_RUN"
+
+  if out="$(remote_ssh "cd '$rdir' && if [ -f vmigrate.env ]; then cat vmigrate.env; else echo '__MISSING_ENV__'; fi" 2>/dev/null)"; then
+    if ! printf '%s\n' "$out" | grep -q '^__MISSING_ENV__$'; then
+      rt_id="$(printf '%s\n' "$out" | awk -F= '$1=="TARGET_ID"{print substr($0,index($0,"=")+1); exit}')"
+      rt_disk="$(printf '%s\n' "$out" | awk -F= '$1=="TARGET_DISK"{print substr($0,index($0,"=")+1); exit}')"
+      rt_port="$(printf '%s\n' "$out" | awk -F= '$1=="NBD_PORT"{print substr($0,index($0,"=")+1); exit}')"
+      rt_export="$(printf '%s\n' "$out" | awk -F= '$1=="NBD_EXPORT"{print substr($0,index($0,"=")+1); exit}')"
+      [[ "$TARGET_ID" == "${rt_id:-}" ]] || mismatch=1
+      [[ "$TARGET_DISK" == "${rt_disk:-}" ]] || mismatch=1
+      [[ "$NBD_PORT" == "${rt_port:-}" ]] || mismatch=1
+      [[ "$NBD_EXPORT" == "${rt_export:-}" ]] || mismatch=1
+      [[ "$mismatch" == "0" ]] && remote_env="OK" || remote_env="MISMATCH"
+    fi
+  fi
+
+  proc="$(remote_ssh "ps -eo pid=,args= | grep '[q]emu-nbd' | grep -- ' -p ${NBD_PORT} ' || true" 2>/dev/null || true)"
+  if [[ -n "$proc" ]]; then
+    if printf '%s\n' "$proc" | grep -F -- " -x ${NBD_EXPORT} " >/dev/null && printf '%s\n' "$proc" | grep -F -- "$TARGET_DISK" >/dev/null; then
+      remote_export="OK"
+    else
+      remote_export="BUSY_OTHER"
+    fi
+  fi
+
+  if tunnel_health_ok >/dev/null 2>&1; then tunnel="OK"; fi
+
+  if [[ "$method" == "blockdev-backup" ]]; then
+    if target_node_exists >/dev/null 2>&1; then target_node="OK"; else target_node="MISSING"; fi
+  fi
+
+  if bitmap_exists >/dev/null 2>&1; then bitmap="OK"; fi
+
+  next=""
+  if [[ "$remote_env" != "OK" ]]; then
+    next="./vmigrate remote-run-check"
+  elif [[ "$remote_export" == "BUSY_OTHER" ]]; then
+    next="./vmigrate set-nbd-port PORT"
+  elif [[ "$remote_export" != "OK" ]]; then
+    next="./vmigrate remote-export"
+  elif [[ "$tunnel" != "OK" ]]; then
+    next="./vmigrate tunnel"
+  elif [[ "$target_node" == "MISSING" ]]; then
+    next="./vmigrate attach-target"
+  elif [[ "$bitmap" != "OK" ]]; then
+    next="./vmigrate bitmap"
+  elif [[ "$full" != "completed" ]]; then
+    if [[ "$(state_get FULL_STARTED)" == "1" ]]; then
+      next="./vmigrate wait-full"
+    else
+      next="./vmigrate full"
+    fi
+  elif [[ "$final" != "completed" ]]; then
+    next="./vmigrate incremental"
+  elif [[ "$source_stopped" != "yes" ]]; then
+    next="./vmigrate stop-source"
+  elif [[ "$verify" != "PASS" ]]; then
+    next="./vmigrate verify"
+  else
+    next="Migration appears complete"
+  fi
+
+  cat <<EOF
+Resume analysis
+---------------
+
+VM            : $VM_NAME
+Run           : $run_id
+Remote run    : $remote_name
+Backup method : $method
+
+Remote env    : $remote_env
+Remote export : $remote_export
+Tunnel        : $tunnel
+Target node   : $target_node
+Bitmap        : $bitmap
+
+FULL          : $full
+FINAL         : $final
+SOURCE stopped: $source_stopped
+VERIFY        : $verify
+
+Recommended next step:
+  $next
+EOF
 }
 
 cleanup_remote_runs(){
@@ -3454,6 +3565,7 @@ case "$cmd" in
   remote-dst-status) remote_dst_status ;;
   remote-dst-close) remote_dst_close ;;
   remote-run-check) remote_run_check ;;
+  resume) resume_check ;;
   set-nbd-port) set_nbd_port "${1:-}" ;;
   quick) quick_start "${1:-}" "${2:-}" ;;
   next) next_steps ;;
