@@ -897,13 +897,27 @@ remote_export_once(){
 }
 
 remote_nbd_port_free_check(){
-  local hit
+  local hit proc
   info "Checking remote NBD port ${NBD_PORT}"
+
+  proc="$(remote_ssh "ps -eo pid=,args= | grep '[q]emu-nbd' | grep -- ' -p ${NBD_PORT} ' || true")" || true
+  if [[ -n "$proc" ]]; then
+    if printf '%s\n' "$proc" | grep -F -- " -x ${NBD_EXPORT} " >/dev/null && printf '%s\n' "$proc" | grep -F -- "$TARGET_DISK" >/dev/null; then
+      ok "Remote NBD export already active for this run"
+      remote_context
+      remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent status"
+      return 2
+    fi
+    printf '%s\n' "$proc"
+    die "Remote NBD port ${NBD_PORT} is already used by another qemu-nbd process. Run remote-dst-close only if this active run owns it, or choose another per-run port with set-nbd-port."
+  fi
+
   hit="$(remote_ssh "ss -lnt 2>/dev/null | awk '{print \$4}' | grep -E '(^|:)${NBD_PORT}$' || true")" || true
   if [[ -n "$hit" ]]; then
     echo "$hit"
     die "Remote NBD port ${NBD_PORT} is already listening on destination. Run remote-dst-close or choose another per-run port with set-nbd-port."
   fi
+
   ok "Remote NBD port is free: ${NBD_PORT}"
 }
 
@@ -911,7 +925,13 @@ remote_export(){
   load_config
   need ssh
 
-  remote_nbd_port_free_check
+  if remote_nbd_port_free_check; then
+    :
+  else
+    rc=$?
+    [[ "$rc" == "2" ]] && return 0
+    return "$rc"
+  fi
 
   local out rc attempt allow_stop=0 did_cleanup=0
 
