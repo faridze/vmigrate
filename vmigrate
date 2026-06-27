@@ -876,9 +876,17 @@ remote_prepare(){
   fi
 }
 
+remote_context(){
+  echo "Remote run dir : $(remote_dir)"
+  echo "Target         : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}"
+  echo "Target ID      : ${TARGET_ID}"
+  echo "NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}"
+}
+
 remote_export_once(){
   local allow_stop="${1:-0}" env_prefix=""
   [[ "$allow_stop" == "1" ]] && env_prefix="VMIGRATE_ALLOW_STOP_TARGET=1 "
+  remote_context
   remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent doctor && ${env_prefix}./vmigrate-agent export && ./vmigrate-agent status"
 }
 
@@ -929,12 +937,14 @@ remote_export(){
 remote_dst_status(){
   load_config
   need ssh
+  remote_context
   remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent status"
 }
 
 remote_dst_close(){
   load_config
   need ssh
+  remote_context
   remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent close"
 }
 
