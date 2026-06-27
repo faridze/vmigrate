@@ -1,11 +1,31 @@
+# vmigrate active/runtime state
 .vmigrate-active
+migrations/
+locks/
+runs/
+logs/
+
+# accidental output files
+Checking
+Starting
+
+# environment/config/runtime secrets
+vmigrate.env
+*.env
+
+# logs and temp files
+*.log
+*.pid
+*.lock
+*.tmp
+*.bak
+tmp/
+.cache/
+
+# editor/OS files
 *.swp
 *.swo
 *~
 .DS_Store
-*.log
-tmp/
-.cache/
-*.tmp
 .vscode/
 .idea/
