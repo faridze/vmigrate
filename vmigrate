@@ -992,7 +992,7 @@ remote_dst_close(){
 
 remote_port_is_free(){
   local port="$1" hit
-  hit="$(remote_ssh "ss -lnt 2>/dev/null | awk '{print \\\$4}' | grep -E '(^|:)${port}$' || true")" || true
+  hit="$(remote_ssh "ss -lnt 2>/dev/null | grep -E '(^|[[:space:]])[^[:space:]]*:${port}[[:space:]]' || true")" || true
   [[ -z "$hit" ]]
 }
 
