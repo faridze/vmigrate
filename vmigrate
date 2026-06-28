@@ -53,7 +53,9 @@ vmigrate v${VERSION}
 
 Usage:
   ./vmigrate version
-  ./vmigrate help [create|manual|batch|resume|ports|status|cleanup]
+  ./vmigrate help [create|manual|batch|resume|ports|status|cleanup|upgrade]
+  ./vmigrate upgrade-check
+  ./vmigrate upgrade
   ./vmigrate discover [VM_NAME] [--yes]
   ./vmigrate init
   ./vmigrate show
@@ -113,6 +115,8 @@ Usage:
 
 Command summary:
   version                         Show vmigrate version
+  upgrade-check                   Check installed version against git remote
+  upgrade                         Upgrade from git remote with safety checks
   create                          Guided end-to-end migration workflow
   remote-prepare                  Prepare destination per-run workspace and handoff
   remote-run-check                Compare local config with remote per-run env
@@ -171,6 +175,7 @@ Help topics:
   ./vmigrate help ports       Automatic/manual NBD port handling
   ./vmigrate help status      Status, reports, jobs, history
   ./vmigrate help cleanup     Safe cleanup and stale cleanup
+  ./vmigrate help upgrade     Check and upgrade vmigrate from git
 
 Common status commands:
   ./vmigrate active           Show active run
@@ -489,6 +494,30 @@ Recover stale tunnel/export:
 
 Safety:
   cleanup does not delete disks, LVs, VM definitions, or migrated data.
+EOF
+      ;;
+
+    upgrade)
+      cat <<EOF
+Upgrade vmigrate
+================
+
+Read-only check:
+  ./vmigrate upgrade-check
+
+Upgrade from current git branch:
+  ./vmigrate upgrade
+
+Safety:
+  - requires a git checkout
+  - refuses dirty working tree
+  - refuses detached HEAD
+  - uses git pull --ff-only
+  - validates vmigrate and vmigrate-agent syntax after upgrade
+  - rolls back to the previous commit if syntax validation fails
+
+Recommended:
+  Run upgrade only when no migration is active.
 EOF
       ;;
 
@@ -3677,6 +3706,105 @@ EOF
   (( shown )) || warn "No matching migration runs found."
 }
 
+
+git_repo_check(){
+  need git
+  git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "vmigrate is not installed as a git checkout: $SCRIPT_DIR"
+}
+
+upgrade_check(){
+  git_repo_check
+
+  local branch head dirty exact_tag latest_tag remote_ref remote_head status_line
+  branch="$(git -C "$SCRIPT_DIR" branch --show-current 2>/dev/null || true)"
+  head="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  exact_tag="$(git -C "$SCRIPT_DIR" describe --tags --exact-match HEAD 2>/dev/null || true)"
+  dirty="$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null || true)"
+
+  git -C "$SCRIPT_DIR" fetch --tags origin >/dev/null 2>&1 || warn "Could not fetch origin/tags"
+
+  latest_tag="$(git -C "$SCRIPT_DIR" tag -l 'v*' --sort=-v:refname | head -1)"
+  if [[ -n "$branch" ]]; then
+    remote_ref="origin/${branch}"
+    remote_head="$(git -C "$SCRIPT_DIR" rev-parse --short "$remote_ref" 2>/dev/null || echo unknown)"
+    if [[ "$remote_head" != "unknown" ]]; then
+      if git -C "$SCRIPT_DIR" merge-base --is-ancestor HEAD "$remote_ref" 2>/dev/null; then
+        if [[ "$head" == "$remote_head" ]]; then
+          status_line="up to date"
+        else
+          status_line="upgrade available"
+        fi
+      else
+        status_line="local branch is ahead or diverged"
+      fi
+    else
+      status_line="remote branch unknown"
+    fi
+  else
+    remote_ref="detached"
+    remote_head="n/a"
+    status_line="detached HEAD"
+  fi
+
+  cat <<EOF
+vmigrate upgrade check
+======================
+Version     : ${VERSION}
+Branch      : ${branch:-detached}
+Commit      : ${head}
+Exact tag   : ${exact_tag:-none}
+Latest tag  : ${latest_tag:-none}
+Remote ref  : ${remote_ref}
+Remote head : ${remote_head}
+Dirty       : $([[ -n "$dirty" ]] && echo yes || echo no)
+Status      : ${status_line}
+EOF
+}
+
+upgrade_cmd(){
+  git_repo_check
+
+  local branch dirty old new
+  branch="$(git -C "$SCRIPT_DIR" branch --show-current 2>/dev/null || true)"
+  [[ -n "$branch" ]] || die "Refusing upgrade from detached HEAD. Checkout a branch first."
+
+  dirty="$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null || true)"
+  [[ -z "$dirty" ]] || die "Refusing upgrade with dirty working tree. Commit/stash/revert changes first."
+
+  git -C "$SCRIPT_DIR" fetch --tags origin || die "git fetch failed"
+
+  git -C "$SCRIPT_DIR" rev-parse --verify "origin/${branch}" >/dev/null 2>&1 || die "Remote branch not found: origin/${branch}"
+
+  old="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)"
+
+  if [[ "$old" == "$(git -C "$SCRIPT_DIR" rev-parse --short "origin/${branch}")" ]]; then
+    ok "vmigrate is already up to date on ${branch}: ${old}"
+    return 0
+  fi
+
+  echo "vmigrate upgrade"
+  echo "================"
+  echo "Branch : ${branch}"
+  echo "From   : ${old}"
+  echo "To     : $(git -C "$SCRIPT_DIR" rev-parse --short "origin/${branch}")"
+  echo
+  warn "Run upgrade only when no migration is active."
+  ask_exact "Continue upgrade? Type UPGRADE:" "UPGRADE" || die "Aborted"
+
+  git -C "$SCRIPT_DIR" pull --ff-only origin "$branch" || die "git pull --ff-only failed"
+
+  new="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)"
+
+  if ! bash -n "$SCRIPT_DIR/vmigrate" "$SCRIPT_DIR/vmigrate-agent"; then
+    warn "Syntax validation failed after upgrade. Rolling back to ${old}."
+    git -C "$SCRIPT_DIR" reset --hard "$old" >/dev/null 2>&1 || true
+    die "Upgrade failed and rollback was attempted."
+  fi
+
+  ok "Upgrade completed: ${old} -> ${new}"
+  echo "Run: ./vmigrate version"
+}
+
 create_workflow(){
   local vm="$1" target_id="$2" target_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}"
 
@@ -3853,6 +3981,8 @@ fi
 
 case "$cmd" in
   version) version_cmd ;;
+  upgrade-check) upgrade_check ;;
+  upgrade) upgrade_cmd ;;
   help|-h|--help) help_cmd "${1:-}" ;;
   init) init_config ;;
   discover) discover "$@" ;;
