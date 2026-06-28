@@ -74,7 +74,7 @@ Usage:
   ./vmigrate remote-dst-close
   ./vmigrate remote-run-check
   ./vmigrate resume [--run]
-  ./vmigrate set-nbd-port PORT
+  ./vmigrate set-nbd-port PORT|auto
   ./vmigrate doctor
   ./vmigrate tunnel
   ./vmigrate tunnel-stop
@@ -1199,8 +1199,8 @@ remote_export(){
     fi
 
     if [[ "$did_cleanup" != "1" ]] && printf '%s\n' "$out" | grep -q "NBD port already in use"; then
-      warn "Remote NBD export port appears to be already in use."
-      warn "NBD_PORT is still fixed at ${NBD_PORT}; parallel migrations to the same destination are not supported yet."
+      warn "Remote NBD export port appears to be already in use: ${NBD_PORT}"
+      warn "If another migration owns this port, do not close it. Choose a different per-run port instead: ./vmigrate set-nbd-port auto"
       warn "Current remote run dir: $(remote_dir)"
       if ask_yes_default "Close remote NBD export for this active run, stop local tunnel, and retry remote-export?"; then
         did_cleanup=1
@@ -1208,7 +1208,7 @@ remote_export(){
         remote_dst_close || warn "Remote NBD close failed or no export was found."
         continue
       fi
-      die "Remote export failed because NBD port ${NBD_PORT} is already in use. Do not run parallel migrations until per-run NBD port support is added."
+      die "Remote export failed because NBD port ${NBD_PORT} is already in use. Choose another per-run port with: ./vmigrate set-nbd-port auto"
     fi
 
     return "$rc"
