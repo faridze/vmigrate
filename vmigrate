@@ -160,7 +160,7 @@ vmigrate help
 
 vmigrate is run-based. Most commands operate on the active run.
 
-Recommended quick path:
+Recommended path:
   ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
 
 Help topics:
@@ -187,10 +187,10 @@ Safety:
 EOF
       ;;
 
-    create|quick)
+    create)
       cat <<EOF
-Create / quick guided migration
-===============================
+Create guided migration
+=======================
 
 Use this for the normal production path.
 
