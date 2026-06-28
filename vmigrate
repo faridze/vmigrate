@@ -53,6 +53,7 @@ vmigrate v${VERSION}
 
 Usage:
   ./vmigrate version
+  ./vmigrate help [quick|manual|batch|resume|ports]
   ./vmigrate discover [VM_NAME] [--yes]
   ./vmigrate init
   ./vmigrate show
@@ -149,6 +150,187 @@ Command summary:
 Recommended first run:
   ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
 EOF
+}
+
+help_cmd(){
+  local topic="${1:-}"
+  case "$topic" in
+    ""|overview)
+      cat <<EOF
+vmigrate help
+
+Common paths:
+  ./vmigrate help quick     Guided migration with create
+  ./vmigrate help manual    Manual step-by-step migration
+  ./vmigrate help batch     Batch FULL sync workflow
+  ./vmigrate help resume    Continue after interruption
+  ./vmigrate help ports     Automatic/manual NBD ports
+
+Useful status commands:
+  ./vmigrate active
+  ./vmigrate list
+  ./vmigrate history
+  ./vmigrate show
+  ./vmigrate resume
+  ./vmigrate report
+EOF
+      ;;
+    quick)
+      cat <<EOF
+Quick guided migration
+
+Start guided workflow:
+  ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+
+Example with placeholders:
+  ./vmigrate create v1001 2001 TARGET_HOST 22 root
+
+During prompts, type only the requested words:
+  YES
+  FULL
+  CUTOVER
+  STOP
+  CLEAN
+
+Notes:
+  STOP is only after final cutover.
+  CLEAN closes NBD export and tunnel only.
+  Real public IPs should not be used in shared examples.
+EOF
+      ;;
+    manual)
+      cat <<EOF
+Manual migration workflow
+
+Prepare destination and handoff:
+  ./vmigrate remote-prepare VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+
+Check local/remote run env:
+  ./vmigrate remote-run-check
+
+Run source checks:
+  ./vmigrate doctor
+
+Open destination NBD export:
+  ./vmigrate remote-export
+
+Start local SSH/autossh tunnel:
+  ./vmigrate tunnel
+
+Check NBD metadata:
+  ./vmigrate tunnel-check
+
+Create/check bitmap:
+  ./vmigrate bitmap
+  ./vmigrate check-bitmap
+
+Start and wait FULL sync:
+  ./vmigrate full
+  ./vmigrate wait-full
+
+Optional pre-cutover incremental:
+  ./vmigrate incremental
+  ./vmigrate wait-inc
+
+Final cutover:
+  ./vmigrate cutover-check
+  ./vmigrate final
+
+Verify and stop source:
+  ./vmigrate verify
+  ./vmigrate stop-source
+
+Cleanup:
+  ./vmigrate remote-dst-close
+  ./vmigrate tunnel-stop
+EOF
+      ;;
+    batch)
+      cat <<EOF
+Batch FULL workflow
+
+Batch file format:
+  VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
+
+Create example batch file:
+  cat > batch.txt <<'EOF_BATCH'
+v1001 2001 TARGET_HOST 22 root
+v1002 2002 TARGET_HOST 22 root
+EOF_BATCH
+
+Run batch FULL:
+  ./vmigrate batch-full batch.txt
+
+Batch behavior:
+  - runs sequentially
+  - creates one run per VM
+  - uses per-run remote workspace
+  - uses automatic per-run NBD port
+  - continues after item failure
+  - performs FULL sync only
+
+After batch:
+  ./vmigrate list
+  ./vmigrate history
+  ./vmigrate use VM_NAME RUN_ID
+  ./vmigrate resume
+EOF
+      ;;
+    resume)
+      cat <<EOF
+Resume after interruption
+
+Read-only analysis:
+  ./vmigrate resume
+
+Run next safe step automatically:
+  ./vmigrate resume --run
+
+resume checks:
+  - remote env
+  - remote export
+  - tunnel
+  - target node
+  - bitmap
+  - FULL state
+  - FINAL state
+  - source stopped state
+  - verify state
+
+Safety:
+  resume --run refuses high-risk steps like:
+    ./vmigrate final
+    ./vmigrate stop-source
+EOF
+      ;;
+    ports)
+      cat <<EOF
+NBD port management
+
+New runs select automatic per-run NBD port by default.
+
+Manually pick automatic free port:
+  ./vmigrate set-nbd-port auto
+
+Set fixed port:
+  ./vmigrate set-nbd-port 10809
+
+Check local/remote env after changing port:
+  ./vmigrate remote-run-check
+
+Disable auto port during create:
+  VMIGRATE_AUTO_NBD_PORT=0 ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+
+If port is busy:
+  ./vmigrate remote-dst-status
+  ./vmigrate remote-dst-close
+  ./vmigrate set-nbd-port auto
+EOF
+      ;;
+    *)
+      die "Unknown help topic: $topic. Try: ./vmigrate help"
+      ;;
+  esac
 }
 
 ask(){ local var="$1" prompt="$2" def="${3:-}" val; read -r -p "$prompt${def:+ [$def]}: " val; printf -v "$var" '%s' "${val:-$def}"; }
@@ -3656,6 +3838,7 @@ EOF
 cmd="${1:-}"; shift || true
 case "$cmd" in
   version) version_cmd ;;
+  help|-h|--help) help_cmd "${1:-}" ;;
   init) init_config ;;
   discover) discover "$@" ;;
   show) show_config ;;
