@@ -1151,13 +1151,13 @@ remote_nbd_port_free_check(){
       return 2
     fi
     printf '%s\n' "$proc"
-    die "Remote NBD port ${NBD_PORT} is already used by another qemu-nbd process. Run remote-dst-close only if this active run owns it, or choose another per-run port with set-nbd-port."
+    die "Remote NBD port ${NBD_PORT} is already used by another qemu-nbd process. Run remote-dst-close only if this active run owns it, or choose another per-run port with: ./vmigrate set-nbd-port auto."
   fi
 
   hit="$(remote_ssh "ss -lnt 2>/dev/null | awk '{print \$4}' | grep -E '(^|:)${NBD_PORT}$' || true")" || true
   if [[ -n "$hit" ]]; then
     echo "$hit"
-    die "Remote NBD port ${NBD_PORT} is already listening on destination. Run remote-dst-close or choose another per-run port with set-nbd-port."
+    die "Remote NBD port ${NBD_PORT} is already listening on destination. Run remote-dst-close or choose another per-run port with: ./vmigrate set-nbd-port auto."
   fi
 
   ok "Remote NBD port is free: ${NBD_PORT}"
