@@ -53,7 +53,7 @@ vmigrate v${VERSION}
 
 Usage:
   ./vmigrate version
-  ./vmigrate help [create|quick|manual|batch|resume|ports|status|cleanup]
+  ./vmigrate help [create|manual|batch|resume|ports|status|cleanup]
   ./vmigrate discover [VM_NAME] [--yes]
   ./vmigrate init
   ./vmigrate show
@@ -168,7 +168,6 @@ Recommended quick path:
 
 Help topics:
   ./vmigrate help create      Guided create workflow
-  ./vmigrate help quick       Guided create workflow
   ./vmigrate help manual      Manual step-by-step workflow
   ./vmigrate help batch       Sequential batch FULL workflow
   ./vmigrate help resume      Continue after interruption
