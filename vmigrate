@@ -53,7 +53,7 @@ vmigrate v${VERSION}
 
 Usage:
   ./vmigrate version
-  ./vmigrate help [quick|manual|batch|resume|ports]
+  ./vmigrate help [quick|manual|batch|resume|ports|status|cleanup]
   ./vmigrate discover [VM_NAME] [--yes]
   ./vmigrate init
   ./vmigrate show
@@ -153,80 +153,110 @@ EOF
 }
 
 help_cmd(){
-  local topic="${1:-}"
+  local topic="${1:-overview}"
+
   case "$topic" in
     ""|overview)
       cat <<EOF
 vmigrate help
+=============
 
-Common paths:
-  ./vmigrate help quick     Guided migration with create
-  ./vmigrate help manual    Manual step-by-step migration
-  ./vmigrate help batch     Batch FULL sync workflow
-  ./vmigrate help resume    Continue after interruption
-  ./vmigrate help ports     Automatic/manual NBD ports
+vmigrate is run-based. Most commands operate on the active run.
 
-Useful status commands:
-  ./vmigrate active
-  ./vmigrate list
-  ./vmigrate history
-  ./vmigrate show
-  ./vmigrate resume
-  ./vmigrate report
+Recommended quick path:
+  ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+
+Help topics:
+  ./vmigrate help quick       Guided create workflow
+  ./vmigrate help manual      Manual step-by-step workflow
+  ./vmigrate help batch       Sequential batch FULL workflow
+  ./vmigrate help resume      Continue after interruption
+  ./vmigrate help ports       Automatic/manual NBD port handling
+  ./vmigrate help status      Status, reports, jobs, history
+  ./vmigrate help cleanup     Safe cleanup and stale cleanup
+
+Common status commands:
+  ./vmigrate active           Show active run
+  ./vmigrate list             List all runs
+  ./vmigrate history          Show latest run per VM
+  ./vmigrate show             Show active run config
+  ./vmigrate resume           Show next recommended step
+  ./vmigrate report           Show migration report
+
+Safety:
+  - Use placeholders like TARGET_HOST in docs/examples.
+  - Do not start the destination VM until final cutover is done, source is stopped, and NBD/tunnel are closed.
+  - resume --run refuses high-risk steps such as final and stop-source.
 EOF
       ;;
+
     quick)
       cat <<EOF
 Quick guided migration
+======================
 
-Start guided workflow:
+Use this for the normal production path.
+
+Command:
   ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
 
 Example with placeholders:
   ./vmigrate create v1001 2001 TARGET_HOST 22 root
 
-During prompts, type only the requested words:
+What create does:
+  1. Creates a new local run directory.
+  2. Makes it the active run.
+  3. Creates a per-run remote workspace.
+  4. Copies vmigrate-agent to the destination.
+  5. Discovers source and destination disk info.
+  6. Selects an automatic per-run NBD port.
+  7. Opens destination NBD export.
+  8. Starts/reuses SSH tunnel.
+  9. Creates bitmap.
+ 10. Starts FULL sync and waits.
+ 11. Offers optional incremental sync.
+ 12. Runs final cutover only after confirmation.
+ 13. Asks before stopping source.
+ 14. Asks before cleanup.
+
+Confirm words you may be asked to type:
   YES
   FULL
   CUTOVER
   STOP
   CLEAN
 
-Notes:
-  STOP is only after final cutover.
-  CLEAN closes NBD export and tunnel only.
-  Real public IPs should not be used in shared examples.
+Important:
+  STOP is only after final completed.
+  CLEAN closes export/tunnel only. It does not delete disks or VMs.
 EOF
       ;;
+
     manual)
       cat <<EOF
 Manual migration workflow
+=========================
 
-Prepare destination and handoff:
+Use this when you want to control each step yourself.
+
+Prepare:
   ./vmigrate remote-prepare VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
-
-Check local/remote run env:
   ./vmigrate remote-run-check
-
-Run source checks:
   ./vmigrate doctor
 
-Open destination NBD export:
+Open destination export and tunnel:
   ./vmigrate remote-export
-
-Start local SSH/autossh tunnel:
   ./vmigrate tunnel
-
-Check NBD metadata:
   ./vmigrate tunnel-check
 
-Create/check bitmap:
+Prepare source block tracking:
   ./vmigrate bitmap
   ./vmigrate check-bitmap
 
-Start and wait FULL sync:
+Run FULL sync:
   ./vmigrate full
   ./vmigrate wait-full
+  ./vmigrate report
 
 Optional pre-cutover incremental:
   ./vmigrate incremental
@@ -236,18 +266,31 @@ Final cutover:
   ./vmigrate cutover-check
   ./vmigrate final
 
-Verify and stop source:
+Post-cutover:
   ./vmigrate verify
   ./vmigrate stop-source
 
 Cleanup:
   ./vmigrate remote-dst-close
   ./vmigrate tunnel-stop
+
+High-risk steps:
+  ./vmigrate final
+  ./vmigrate stop-source
+
+Review status before high-risk steps:
+  ./vmigrate resume
+  ./vmigrate report
 EOF
       ;;
+
     batch)
       cat <<EOF
 Batch FULL workflow
+===================
+
+Batch mode runs FULL syncs sequentially and continues after item failure.
+It does not perform final cutover.
 
 Batch file format:
   VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
@@ -262,71 +305,196 @@ Run batch FULL:
   ./vmigrate batch-full batch.txt
 
 Batch behavior:
-  - runs sequentially
   - creates one run per VM
-  - uses per-run remote workspace
+  - prepares destination per run
   - uses automatic per-run NBD port
-  - continues after item failure
-  - performs FULL sync only
+  - opens export/tunnel per item
+  - runs FULL and waits
+  - closes export/tunnel before next item
+  - continues after failed item
+  - writes batch summary under migrations/batches/
 
 After batch:
   ./vmigrate list
   ./vmigrate history
+  ./vmigrate history VM_NAME --all
+
+Review one run:
   ./vmigrate use VM_NAME RUN_ID
   ./vmigrate resume
+  ./vmigrate report
+
+Cutover is manual per VM after review.
 EOF
       ;;
+
     resume)
       cat <<EOF
 Resume after interruption
+=========================
+
+Use this after SSH disconnect, tmux close, reboot, or when you forgot the next step.
 
 Read-only analysis:
   ./vmigrate resume
 
-Run next safe step automatically:
+Run the next safe step automatically:
   ./vmigrate resume --run
 
 resume checks:
-  - remote env
-  - remote export
-  - tunnel
+  - remote env consistency
+  - remote NBD export
+  - local SSH tunnel
   - target node
-  - bitmap
+  - source bitmap
   - FULL state
   - FINAL state
   - source stopped state
   - verify state
 
-Safety:
-  resume --run refuses high-risk steps like:
-    ./vmigrate final
-    ./vmigrate stop-source
+Safe steps resume --run may execute:
+  remote-run-check
+  remote-export
+  tunnel
+  attach-target
+  bitmap
+  full
+  wait-full
+  incremental
+  verify
+
+High-risk steps are refused:
+  ./vmigrate final
+  ./vmigrate stop-source
+
+For high-risk steps, review first:
+  ./vmigrate resume
+  ./vmigrate report
 EOF
       ;;
+
     ports)
       cat <<EOF
 NBD port management
+===================
 
-New runs select automatic per-run NBD port by default.
+New runs select automatic per-run NBD ports by default.
 
-Manually pick automatic free port:
+Pick automatic free port for active run:
   ./vmigrate set-nbd-port auto
 
-Set fixed port:
+Set a fixed port:
   ./vmigrate set-nbd-port 10809
 
-Check local/remote env after changing port:
+Verify local/remote env after port change:
   ./vmigrate remote-run-check
 
-Disable auto port during create:
+Disable automatic port selection for a new create:
   VMIGRATE_AUTO_NBD_PORT=0 ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
 
 If port is busy:
   ./vmigrate remote-dst-status
   ./vmigrate remote-dst-close
   ./vmigrate set-nbd-port auto
+  ./vmigrate remote-run-check
+
+Production note:
+  Parallel migrations should still be tested carefully. Use separate NBD ports and watch destination I/O load.
 EOF
       ;;
+
+    status)
+      cat <<EOF
+Status, reports, and jobs
+=========================
+
+Show active run:
+  ./vmigrate active
+
+List runs:
+  ./vmigrate list
+
+Show latest history:
+  ./vmigrate history
+
+Show all history for one VM:
+  ./vmigrate history VM_NAME --all
+
+Show failed runs:
+  ./vmigrate history --failed
+
+Show current config:
+  ./vmigrate show
+
+Show report:
+  ./vmigrate report
+
+Watch block job progress:
+  ./vmigrate watch
+
+Show QEMU block jobs:
+  ./vmigrate jobs
+
+Dismiss concluded jobs:
+  ./vmigrate jobs-dismiss-all
+
+Cancel a running job:
+  ./vmigrate job-cancel JOB_ID
+
+Force-cancel a stuck job:
+  ./vmigrate job-cancel-force JOB_ID
+
+Common job IDs:
+  full
+  inc1
+  final
+EOF
+      ;;
+
+    cleanup)
+      cat <<EOF
+Cleanup and stale recovery
+==========================
+
+Normal cleanup for active run:
+  ./vmigrate cleanup
+
+Stop local tunnel:
+  ./vmigrate tunnel-stop
+
+Close destination NBD export:
+  ./vmigrate remote-dst-close
+
+Show destination NBD status:
+  ./vmigrate remote-dst-status
+
+Safe stale cleanup:
+  ./vmigrate cleanup-stale
+
+Force stale cleanup:
+  ./vmigrate cleanup-stale --force
+
+Show locks:
+  ./vmigrate lock-status
+
+Remove stale locks:
+  ./vmigrate unlock-stale
+
+List old remote run directories without deleting:
+  ./vmigrate cleanup-remote-runs --dry-run
+
+Recover stale tunnel/export:
+  ./vmigrate tunnel-stop
+  ./vmigrate remote-dst-close
+  ./vmigrate remote-export
+  ./vmigrate tunnel
+  ./vmigrate tunnel-check
+
+Safety:
+  cleanup does not delete disks, LVs, VM definitions, or migrated data.
+EOF
+      ;;
+
     *)
       die "Unknown help topic: $topic. Try: ./vmigrate help"
       ;;
