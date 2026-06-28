@@ -127,7 +127,7 @@ The active run pointer is stored in:
 .vmigrate-active
 ```
 
-Most commands automatically use the active run. If no active run exists, `vmigrate` falls back to the legacy `vmigrate.env` file.
+Most commands automatically use the active run. If no active run exists, `vmigrate` falls back to the default `vmigrate.env` file.
 
 Show all migration runs:
 
@@ -800,6 +800,3 @@ If still failing:
 
 ---
 
-## Legacy UI
-
-The old terminal UI is retained only as legacy/experimental code under `legacy/` if present. The supported production workflow is the `vmigrate` CLI.
