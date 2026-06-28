@@ -53,7 +53,7 @@ vmigrate v${VERSION}
 
 Usage:
   ./vmigrate version
-  ./vmigrate help [quick|manual|batch|resume|ports|status|cleanup]
+  ./vmigrate help [create|quick|manual|batch|resume|ports|status|cleanup]
   ./vmigrate discover [VM_NAME] [--yes]
   ./vmigrate init
   ./vmigrate show
@@ -167,6 +167,7 @@ Recommended quick path:
   ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
 
 Help topics:
+  ./vmigrate help create      Guided create workflow
   ./vmigrate help quick       Guided create workflow
   ./vmigrate help manual      Manual step-by-step workflow
   ./vmigrate help batch       Sequential batch FULL workflow
@@ -190,10 +191,10 @@ Safety:
 EOF
       ;;
 
-    quick)
+    create|quick)
       cat <<EOF
-Quick guided migration
-======================
+Create / quick guided migration
+===============================
 
 Use this for the normal production path.
 
@@ -4018,7 +4019,12 @@ case "$cmd" in
   clear-active) run_clear_active ;;
   apply-handoff) apply_handoff "${1:-}" ;;
   remote-prepare) remote_prepare "${1:-}" "${3:-}" "${2:-}" "${4:-22}" "${5:-root}" ;;
-  create) create_workflow "${1:-}" "${2:-}" "${3:-}" "${4:-22}" "${5:-root}" ;;
+  create)
+    case "${1:-}" in
+      -h|--help|help) help_cmd create; exit 0 ;;
+    esac
+    create_workflow "${1:-}" "${2:-}" "${3:-}" "${4:-22}" "${5:-root}"
+    ;;
   batch-full) batch_full "${1:-}" ;;
   remote-export) remote_export ;;
   remote-dst-status) remote_dst_status ;;
