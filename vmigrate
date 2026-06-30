@@ -1683,6 +1683,22 @@ format_duration(){
 }
 
 
+
+format_bytes_short(){
+  local h="$1"
+
+  h="${h/.0 GiB/G}"
+  h="${h/.0 MiB/M}"
+  h="${h/.0 KiB/K}"
+
+  h="${h// GiB/G}"
+  h="${h// MiB/M}"
+  h="${h// KiB/K}"
+
+  printf '%s\n' "$h"
+}
+
+# Select progress layout based on terminal width.
 progress_layout(){
   local cols="${1:-${COLUMNS:-120}}"
 
@@ -1771,7 +1787,7 @@ progress_line(){
   fi
 
   cols="${COLUMNS:-120}"
-  layout="$(progress_layout)"
+  layout="$(progress_layout "$cols")"
 
   case "$layout" in
     full)    width=30 ;;
@@ -1785,6 +1801,27 @@ progress_line(){
     empty=$(( width - filled ))
     bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
   fi
+
+  offset_short="$offset_h"
+  len_short="$len_h"
+  speed_short="$speed_h"
+
+  offset_short="${offset_short/.0 GiB/G}"
+  offset_short="${offset_short/.0 MiB/M}"
+  offset_short="${offset_short/.0 KiB/K}"
+  offset_short="${offset_short// GiB/G}"
+  offset_short="${offset_short// MiB/M}"
+  offset_short="${offset_short// KiB/K}"
+
+  len_short="${len_short/.0 GiB/G}"
+  len_short="${len_short/.0 MiB/M}"
+  len_short="${len_short/.0 KiB/K}"
+  len_short="${len_short// GiB/G}"
+  len_short="${len_short// MiB/M}"
+  len_short="${len_short// KiB/K}"
+
+  speed_short="${speed_short/.0 MiB\/s/M\/s}"
+  speed_short="${speed_short// MiB\/s/M\/s}"
 
   case "$layout" in
 
@@ -1800,21 +1837,37 @@ progress_line(){
 
     compact)
       printf '[%s] %d%% | %s/%s | %s | ETA %s' \
-        "$bar" "$pct" "$offset_h" "$len_h" "$speed_h" "$eta_h"
+        "$bar" \
+        "$pct" \
+        "$offset_short" \
+        "$len_short" \
+        "$speed_short" \
+        "$eta_h"
       ;;
 
     short)
-      printf '[%s] %d%% | %s/%s' \
-        "$bar" "$pct" "$offset_h" "$len_h"
+      printf '[%s] %d%% | %s/%s | ETA %s' \
+        "$bar" \
+        "$pct" \
+        "$offset_short" \
+        "$len_short" \
+        "$eta_h"
       ;;
 
     tiny)
-      printf '%d%% | %s/%s' \
-        "$pct" "$offset_h" "$len_h"
+      printf '%d%% | %s/%s | ETA %s' \
+        "$pct" \
+        "$offset_short" \
+        "$len_short" \
+        "$eta_h"
       ;;
 
     *)
-      printf '%d%%' "$pct"
+      if [[ "$eta_h" != "n/a" ]]; then
+        printf '%d%% | ETA %s' "$pct" "$eta_h"
+      else
+        printf '%d%%' "$pct"
+      fi
       ;;
 
   esac
