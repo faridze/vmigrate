@@ -1824,8 +1824,64 @@ discover(){
   existing_disk="${SRC_DISK:-}"
   info "Reading QEMU info block for $VM_NAME"
   out="$(virsh qemu-monitor-command "$VM_NAME" --hmp "info block")"
-  echo "$out"
-  detected="$(printf '%s\n' "$out" | parse_info_block)"
+
+  detected="$(awk '
+    function emit_if_ready() {
+      if (disk != "" && dev != "") {
+        if (node == "")
+          node=dev
+        printf "%s\t%s\t%s\n", dev, node, disk
+      }
+    }
+
+    /^[^[:space:]].*: / {
+      emit_if_ready()
+
+      dev=$1
+      sub(/:$/, "", dev)
+      disk=""
+      node=""
+
+      # Minimal libvirt/QEMU HMP format:
+      #   libvirt-1-format: /dev/volgroup/kvm2644_img (raw)
+      #   drive-virtio-disk0: /path/to/disk (qcow2)
+      if (match($0, /: [^ ]+ \(/)) {
+        disk=$0
+        sub(/^[^:]+: /, "", disk)
+        sub(/ \(.*/, "", disk)
+      }
+
+      if (dev ~ /-format$/)
+        node=dev
+
+      next
+    }
+
+    /^[[:space:]]*node-name:/ {
+      node=$2
+      next
+    }
+
+    /^[[:space:]]*file:/ {
+      if (disk == "") {
+        disk=$0
+        sub(/^[[:space:]]*file:[[:space:]]*/, "", disk)
+      }
+      next
+    }
+
+    /^[[:space:]]*Attached to:/ {
+      emit_if_ready()
+      disk=""
+      dev=""
+      node=""
+      next
+    }
+
+    END {
+      emit_if_ready()
+    }
+  ' <<<"$out" | awk 'NF && !seen[$0]++')"
   [[ -n "$detected" ]] || die "Could not parse info block output"
   count="$(printf '%s\n' "$detected" | wc -l | awk '{print $1}')"
   if [[ -n "$existing_disk" ]]; then
