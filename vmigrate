@@ -565,7 +565,7 @@ load_config(){
   TUNNEL_MODE="${TUNNEL_MODE:-autossh}"
   AUTOSSH_MONITOR_PORT="${AUTOSSH_MONITOR_PORT:-20000}"
   BACKUP_METHOD="${BACKUP_METHOD:-drive-backup}"
-  FULL_METHOD="${FULL_METHOD:-qemu}"
+  FULL_METHOD="${FULL_METHOD:-auto}"
   QMP_TIMEOUT="${QMP_TIMEOUT:-20}"
   CHECK_TIMEOUT="${CHECK_TIMEOUT:-8}"
   NBD_IO_TIMEOUT="${NBD_IO_TIMEOUT:-20}"
@@ -2545,10 +2545,16 @@ backup_job(){
 
 full_method(){
   load_config
-  case "${FULL_METHOD:-qemu}" in
+  case "${FULL_METHOD:-auto}" in
     qemu) printf 'qemu' ;;
     dd) printf 'dd' ;;
-    auto) printf 'qemu' ;;
+    auto)
+      if src_disk_is_raw_block; then
+        printf 'dd'
+      else
+        printf 'qemu'
+      fi
+      ;;
     *) printf 'qemu' ;;
   esac
 }
@@ -2676,7 +2682,7 @@ report(){
   report_kv "Bitmap" "$BITMAP"
   report_kv "Target node" "$TARGET_NODE"
   report_kv "Backup method" "${BACKUP_METHOD:-drive-backup}"
-  report_kv "Full method" "${FULL_METHOD:-qemu}"
+  report_kv "Full method" "${FULL_METHOD:-auto} ($(full_method))"
   report_kv "Effective method" "$(effective_backup_method)"
   report_kv "State file" "$(state_file)"
   report_kv "FULL_STARTED" "$(state_get FULL_STARTED)"
@@ -3412,7 +3418,7 @@ EOF
   preflight
 
   write_key BACKUP_METHOD drive-backup
-  write_key FULL_METHOD "${VMIGRATE_FULL_METHOD:-qemu}"
+  write_key FULL_METHOD "${VMIGRATE_FULL_METHOD:-auto}"
   load_config
 
   # Ensure batch cleanup helpers use the batch connection settings.
@@ -4107,7 +4113,7 @@ EOF
   preflight
 
   write_key BACKUP_METHOD drive-backup
-  write_key FULL_METHOD "${VMIGRATE_FULL_METHOD:-qemu}"
+  write_key FULL_METHOD "${VMIGRATE_FULL_METHOD:-auto}"
   load_config
 
   # Batch mode is non-interactive. If a previous export/tunnel was left open
