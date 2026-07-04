@@ -4107,6 +4107,7 @@ EOF
   preflight
 
   write_key BACKUP_METHOD drive-backup
+  write_key FULL_METHOD "${VMIGRATE_FULL_METHOD:-qemu}"
   load_config
 
   # Batch mode is non-interactive. If a previous export/tunnel was left open
