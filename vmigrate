@@ -2568,27 +2568,27 @@ dd_full_copy(){
   [[ -n "${SRC_DISK:-}" ]] || die "SRC_DISK is empty. Run discover first."
   [[ -n "${TARGET_DISK:-}" ]] || die "TARGET_DISK is empty. Run prepare/create first."
   [[ -n "${TARGET_HOST:-}" ]] || die "TARGET_HOST is empty."
-  [[ -n "${SSH_PORT:-}" ]] || die "SSH_PORT is empty."
-  [[ -n "${SSH_USER:-}" ]] || SSH_USER=root
+  [[ -n "${TARGET_SSH_PORT:-}" ]] || die "TARGET_SSH_PORT is empty."
+  [[ -n "${TARGET_SSH_USER:-}" ]] || TARGET_SSH_USER=root
 
   src_disk_is_raw_block || die "dd full requires a raw block source disk. SRC_DISK=$SRC_DISK"
 
   local src_size dst_size
   src_size="$(disk_size_bytes "$SRC_DISK")" || die "Could not read source disk size: $SRC_DISK"
 
-  dst_size="$(ssh -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${TARGET_HOST}" "test -b '$TARGET_DISK' && blockdev --getsize64 '$TARGET_DISK'")" \
+  dst_size="$(ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${TARGET_SSH_USER}@${TARGET_HOST}" "test -b '$TARGET_DISK' && blockdev --getsize64 '$TARGET_DISK'")" \
     || die "Target disk is not a block device or size check failed: $TARGET_DISK"
 
   [[ "$src_size" == "$dst_size" ]] || die "Source/target size mismatch: source=$src_size target=$dst_size"
 
   ok "Starting dd full copy"
   echo "Source : $SRC_DISK"
-  echo "Target : ${SSH_USER}@${TARGET_HOST}:${TARGET_DISK}"
+  echo "Target : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_DISK}"
   echo "Size   : $src_size bytes"
   warn "dd full copy has no QMP block job. Do not interrupt it."
 
   dd if="$SRC_DISK" bs=4M iflag=fullblock status=progress \
-    | ssh -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${TARGET_HOST}" \
+    | ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${TARGET_SSH_USER}@${TARGET_HOST}" \
         "dd of='$TARGET_DISK' bs=4M iflag=fullblock conv=fsync status=progress"
 
   ok "dd full copy completed"
