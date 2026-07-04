@@ -565,6 +565,7 @@ load_config(){
   TUNNEL_MODE="${TUNNEL_MODE:-autossh}"
   AUTOSSH_MONITOR_PORT="${AUTOSSH_MONITOR_PORT:-20000}"
   BACKUP_METHOD="${BACKUP_METHOD:-drive-backup}"
+  FULL_METHOD="${FULL_METHOD:-qemu}"
   QMP_TIMEOUT="${QMP_TIMEOUT:-20}"
   CHECK_TIMEOUT="${CHECK_TIMEOUT:-8}"
   NBD_IO_TIMEOUT="${NBD_IO_TIMEOUT:-20}"
@@ -2542,9 +2543,77 @@ backup_job(){
   fi
 }
 
+full_method(){
+  load_config
+  case "${FULL_METHOD:-qemu}" in
+    qemu) printf 'qemu' ;;
+    dd) printf 'dd' ;;
+    auto) printf 'qemu' ;;
+    *) printf 'qemu' ;;
+  esac
+}
+
+src_disk_is_raw_block(){
+  load_config
+  [[ -n "${SRC_DISK:-}" ]] || return 1
+  [[ -b "$SRC_DISK" ]] || return 1
+  case "$SRC_DISK" in
+    /dev/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+dd_full_copy(){
+  load_config
+  [[ -n "${SRC_DISK:-}" ]] || die "SRC_DISK is empty. Run discover first."
+  [[ -n "${TARGET_DISK:-}" ]] || die "TARGET_DISK is empty. Run prepare/create first."
+  [[ -n "${TARGET_HOST:-}" ]] || die "TARGET_HOST is empty."
+  [[ -n "${SSH_PORT:-}" ]] || die "SSH_PORT is empty."
+  [[ -n "${SSH_USER:-}" ]] || SSH_USER=root
+
+  src_disk_is_raw_block || die "dd full requires a raw block source disk. SRC_DISK=$SRC_DISK"
+
+  local src_size dst_size
+  src_size="$(disk_size_bytes "$SRC_DISK")" || die "Could not read source disk size: $SRC_DISK"
+
+  dst_size="$(ssh -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${TARGET_HOST}" "test -b '$TARGET_DISK' && blockdev --getsize64 '$TARGET_DISK'")" \
+    || die "Target disk is not a block device or size check failed: $TARGET_DISK"
+
+  [[ "$src_size" == "$dst_size" ]] || die "Source/target size mismatch: source=$src_size target=$dst_size"
+
+  ok "Starting dd full copy"
+  echo "Source : $SRC_DISK"
+  echo "Target : ${SSH_USER}@${TARGET_HOST}:${TARGET_DISK}"
+  echo "Size   : $src_size bytes"
+  warn "dd full copy has no QMP block job. Do not interrupt it."
+
+  dd if="$SRC_DISK" bs=4M iflag=fullblock status=progress \
+    | ssh -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${TARGET_HOST}" \
+        "dd of='$TARGET_DISK' bs=4M iflag=fullblock conv=fsync status=progress"
+
+  ok "dd full copy completed"
+}
+
 full_sync(){
   load_config
   state_sync_identity
+
+  case "$(full_method)" in
+    dd)
+      if src_disk_is_raw_block; then
+        dd_full_copy
+        state_write FULL_STARTED 1
+        state_write FULL_STARTED_AT "$(now_ts)"
+        state_write FULL_JOB_ID dd
+        state_write FULL_COMPLETED 1
+        state_write FULL_COMPLETED_AT "$(now_ts)"
+        ok "Full sync completed by dd"
+        return 0
+      fi
+      warn "FULL_METHOD=dd requested, but source is not a raw block device. Falling back to QEMU full backup."
+      ;;
+  esac
+
   backup_job full full
   state_write FULL_STARTED 1
   state_write FULL_STARTED_AT "$(now_ts)"
@@ -2607,6 +2676,7 @@ report(){
   report_kv "Bitmap" "$BITMAP"
   report_kv "Target node" "$TARGET_NODE"
   report_kv "Backup method" "${BACKUP_METHOD:-drive-backup}"
+  report_kv "Full method" "${FULL_METHOD:-qemu}"
   report_kv "Effective method" "$(effective_backup_method)"
   report_kv "State file" "$(state_file)"
   report_kv "FULL_STARTED" "$(state_get FULL_STARTED)"
@@ -3342,6 +3412,7 @@ EOF
   preflight
 
   write_key BACKUP_METHOD drive-backup
+  write_key FULL_METHOD qemu
   load_config
 
   # Ensure batch cleanup helpers use the batch connection settings.
