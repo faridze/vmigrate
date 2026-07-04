@@ -3412,7 +3412,7 @@ EOF
   preflight
 
   write_key BACKUP_METHOD drive-backup
-  write_key FULL_METHOD qemu
+  write_key FULL_METHOD "${VMIGRATE_FULL_METHOD:-qemu}"
   load_config
 
   # Ensure batch cleanup helpers use the batch connection settings.
