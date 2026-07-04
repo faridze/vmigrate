@@ -2593,9 +2593,21 @@ dd_full_copy(){
   echo "Size   : $src_size bytes"
   warn "dd full copy has no QMP block job. Do not interrupt it."
 
+  local old_pipefail=0
+  set -o | grep -q '^pipefail[[:space:]]*on$' && old_pipefail=1
+  set -o pipefail
+
   dd if="$SRC_DISK" bs=4M iflag=fullblock status=progress \
     | ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${TARGET_SSH_USER}@${TARGET_HOST}" \
         "dd of='$TARGET_DISK' bs=4M iflag=fullblock conv=fsync status=progress"
+
+  local rc=$?
+
+  if (( old_pipefail == 0 )); then
+    set +o pipefail
+  fi
+
+  (( rc == 0 )) || die "dd full copy failed (exit=$rc)"
 
   ok "dd full copy completed"
 }
