@@ -53,7 +53,7 @@ vmigrate v${VERSION}
 
 Usage:
   ./vmigrate version
-  ./vmigrate help [create|manual|batch|resume|ports|status|cleanup|upgrade]
+  ./vmigrate help [create|manual|batch|resume|finalize|ports|status|cleanup|upgrade]
   ./vmigrate upgrade-check
   ./vmigrate upgrade
   ./vmigrate discover [VM_NAME] [--yes]
@@ -76,6 +76,7 @@ Usage:
   ./vmigrate remote-dst-close
   ./vmigrate remote-run-check
   ./vmigrate resume [--run]
+  ./vmigrate finalize
   ./vmigrate set-nbd-port PORT|auto
   ./vmigrate doctor
   ./vmigrate tunnel
@@ -122,6 +123,7 @@ Command summary:
   remote-run-check                Compare local config with remote per-run env
   resume                          Analyze active run and suggest next step
   resume --run                    Run the next safe resume step automatically
+  finalize                        Guided interactive post-FULL final workflow
   set-nbd-port auto               Pick a free per-run NBD port
   remote-export                   Start/reuse destination NBD export
   remote-dst-status               Show destination VM/NBD status
@@ -172,6 +174,7 @@ Help topics:
   ./vmigrate help manual      Manual step-by-step workflow
   ./vmigrate help batch       Sequential batch FULL workflow
   ./vmigrate help resume      Continue after interruption
+  ./vmigrate help finalize    Guided interactive post-FULL final workflow
   ./vmigrate help ports       Automatic/manual NBD port handling
   ./vmigrate help status      Status, reports, jobs, history
   ./vmigrate help cleanup     Safe cleanup and stale cleanup
@@ -188,7 +191,7 @@ Common status commands:
 Safety:
   - Use placeholders like TARGET_HOST in docs/examples.
   - Do not start the destination VM until final cutover is done, source is stopped, and NBD/tunnel are closed.
-  - resume --run refuses high-risk steps such as final and stop-source.
+  - resume --run refuses high-risk workflows and steps such as finalize, final, and stop-source.
 EOF
       ;;
 
@@ -264,7 +267,10 @@ Optional pre-cutover incremental:
   ./vmigrate incremental
   ./vmigrate wait-inc
 
-Final cutover:
+Final guided workflow:
+  ./vmigrate finalize
+
+Manual final cutover:
   ./vmigrate cutover-check
   ./vmigrate final
 
@@ -365,13 +371,38 @@ Safe steps resume --run may execute:
   incremental
   verify
 
-High-risk steps are refused:
+High-risk workflow/steps are refused:
+  ./vmigrate finalize
   ./vmigrate final
   ./vmigrate stop-source
 
-For high-risk steps, review first:
+For high-risk work, review first:
   ./vmigrate resume
   ./vmigrate report
+EOF
+      ;;
+
+    finalize)
+      cat <<EOF
+Finalize guided workflow
+========================
+
+Use this after FULL sync is completed and reviewed.
+
+Command:
+  ./vmigrate finalize
+
+What finalize does:
+  1. Verifies the active run config and state.
+  2. Verifies remote env, export, tunnel, bitmap, and block jobs.
+  3. Offers an optional pre-cutover incremental sync.
+  4. Requires exact confirmation before FINAL cutover.
+  5. Asks before stopping source.
+  6. Asks before closing export/tunnel.
+
+Safety:
+  FINAL suspends the source VM. Lock customer/Virtualizor controls before confirming.
+  resume --run refuses to auto-run finalize.
 EOF
       ;;
 
@@ -1447,7 +1478,7 @@ resume_check(){
       next="./vmigrate full"
     fi
   elif [[ "$final" != "completed" ]]; then
-    next="./vmigrate incremental"
+    next="./vmigrate finalize"
   elif [[ "$source_stopped" != "yes" ]]; then
     next="./vmigrate stop-source"
   elif [[ "$verify" != "PASS" ]]; then
@@ -1493,6 +1524,9 @@ EOF
       "./vmigrate wait-full") wait_full ;;
       "./vmigrate incremental") incremental_sync ;;
       "./vmigrate verify") sample_verify 64 ;;
+      "./vmigrate finalize")
+        die "Refusing to auto-run high-risk workflow: ./vmigrate finalize. Run it manually after review."
+        ;;
       "./vmigrate set-nbd-port PORT")
         die "Cannot auto-run set-nbd-port without a concrete PORT. Run set-nbd-port auto or set-nbd-port PORT manually."
         ;;
@@ -3090,6 +3124,126 @@ final_cutover(){
   final_cutover_run
 }
 
+
+finalize_workflow(){
+  load_config
+
+  VMIGRATE_LOCKED_VM="$VM_NAME"
+  lock_acquire "$VMIGRATE_LOCKED_VM"
+  trap 'lock_release "$VMIGRATE_LOCKED_VM"' EXIT
+
+  state_sync_identity
+
+  if [[ "$(state_get FULL_COMPLETED)" != "1" ]]; then
+    die "FULL is not completed. Run ./vmigrate resume first."
+  fi
+
+  if [[ "$(state_get FINAL_COMPLETED)" == "1" ]]; then
+    report
+
+    if [[ "$(state_get SOURCE_STOPPED)" != "1" ]]; then
+      if ask_exact "Stop source VM now? Type STOP:" "STOP"; then
+        stop_source_run
+      fi
+    fi
+
+    if ask_exact "Close destination NBD export and local tunnel now? Type CLEAN:" "CLEAN"; then
+      tunnel_stop || warn "Tunnel stop failed or no tunnel found."
+      remote_dst_close || warn "Remote NBD close failed or no export found."
+      ok "Cleanup completed"
+    else
+      cat <<EOF
+Cleanup skipped.
+Manual cleanup commands:
+  ./vmigrate tunnel-stop
+  ./vmigrate remote-dst-close
+EOF
+    fi
+
+    cat <<EOF
+Review:
+  ./vmigrate report
+EOF
+    return 0
+  fi
+
+  remote_run_check
+  remote_export
+  if ! tunnel_health_ok >/dev/null 2>&1; then
+    start_tunnel
+  fi
+  tunnel_check || die "NBD metadata check failed. Fix tunnel/export before finalizing."
+
+  if ! bitmap_exists; then
+    die "Bitmap $BITMAP is missing after FULL completed. Refusing to recreate it because changes since FULL would be missed."
+  fi
+
+  if ! block_jobs_empty; then
+    warn "Active block job found before incremental/final."
+    jobs_cmd || true
+    die "A block job is still present. Resolve it before starting incremental/final."
+  fi
+
+  report
+
+  if ask_yes_default "Run pre-cutover incremental sync first?"; then
+    incremental_sync
+    wait_inc
+    report
+    archive_report "report.after-pre-final-inc"
+  fi
+
+  cat <<EOF
+
+WARNING: Source VM will be suspended during FINAL cutover.
+Customer/Virtualizor controls should be locked before continuing.
+EOF
+
+  if ! ask_exact "Start FINAL cutover now? Type FINAL:" "FINAL"; then
+    cat <<EOF
+Final cutover not started.
+Resume later:
+  ./vmigrate finalize
+EOF
+    return 0
+  fi
+
+  final_cutover_run
+  report
+  archive_report "report.final"
+
+  if ask_exact "Stop source VM now? Type STOP:" "STOP"; then
+    stop_source_run
+  else
+    cat <<EOF
+Source VM was not stopped.
+The source VM is suspended after final cutover, not running.
+Do not resume it unless you are intentionally rolling back.
+You can stop later:
+  ./vmigrate stop-source
+EOF
+  fi
+
+  if ask_exact "Close destination NBD export and local tunnel now? Type CLEAN:" "CLEAN"; then
+    tunnel_stop || warn "Tunnel stop failed or no tunnel found."
+    remote_dst_close || warn "Remote NBD close failed or no export found."
+    ok "Cleanup completed"
+  else
+    cat <<EOF
+Cleanup skipped.
+You can clean later:
+  ./vmigrate tunnel-stop
+  ./vmigrate remote-dst-close
+EOF
+  fi
+
+  cat <<EOF
+Migration workflow finished.
+Review:
+  ./vmigrate report
+EOF
+}
+
 cleanup(){
   load_config
   pkill -f "${NBD_PORT}:127.0.0.1:${NBD_PORT}.*${TARGET_HOST}" >/dev/null 2>&1 || true
@@ -4170,9 +4324,19 @@ EOF
     cat <<EOF
 Full sync not started.
 Resume manually:
+EOF
+    if [[ "$(full_method)" == "dd" ]]; then
+      cat <<EOF
+  ./vmigrate full
+  ./vmigrate finalize
+EOF
+    else
+      cat <<EOF
   ./vmigrate full
   ./vmigrate wait-full
+  ./vmigrate finalize
 EOF
+    fi
     return 0
   fi
 
@@ -4296,6 +4460,7 @@ case "$cmd" in
   remote-dst-close) remote_dst_close ;;
   remote-run-check) remote_run_check ;;
   resume) resume_check "$@" ;;
+  finalize) finalize_workflow ;;
   set-nbd-port) set_nbd_port "${1:-}" ;;
   doctor) preflight ;;
   tunnel) start_tunnel ;;
