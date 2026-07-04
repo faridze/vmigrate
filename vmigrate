@@ -4157,7 +4157,9 @@ EOF
   fi
 
   full_sync
-  wait_full
+  if [[ "$(state_get FULL_JOB_ID)" != "dd" ]]; then
+    wait_full
+  fi
   report
   archive_report "report.after-full"
 
