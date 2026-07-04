@@ -1719,6 +1719,118 @@ format_duration(){
 
 
 
+
+format_eta(){
+  local sec="${1:-}"
+  [[ "$sec" =~ ^[0-9]+$ ]] || { printf -- '--:--:--'; return 0; }
+  format_duration "$sec"
+}
+
+render_dd_progress_line(){
+  local copied="${1:-0}" total="${2:-0}" speed_text="${3:-}" speed_bps="${4:-}"
+  local width=20 pct filled empty bar copied_h total_h eta_h remaining
+
+  [[ "$copied" =~ ^[0-9]+$ ]] || copied=0
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+
+  if (( total > 0 )); then
+    pct=$(( copied * 100 / total ))
+  else
+    pct=0
+  fi
+  (( pct > 100 )) && pct=100
+
+  filled=$(( pct * width / 100 ))
+  empty=$(( width - filled ))
+  bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
+
+  copied_h="$(format_bytes_short "$(format_bytes "$copied")")"
+  total_h="$(format_bytes_short "$(format_bytes "$total")")"
+  [[ -n "$speed_text" ]] || speed_text="n/a"
+
+  eta_h="--:--:--"
+  if [[ "$speed_bps" =~ ^[0-9]+$ && "$speed_bps" -gt 0 && "$total" -gt 0 ]]; then
+    remaining=$(( total - copied ))
+    (( remaining < 0 )) && remaining=0
+    eta_h="$(format_eta "$(( remaining / speed_bps ))")"
+  fi
+
+  printf '[%s] %s%% | %s/%s | %s | ETA %s' "$bar" "$pct" "$copied_h" "$total_h" "$speed_text" "$eta_h"
+}
+
+parse_dd_progress_line(){
+  local line="$1" total="${2:-0}"
+
+  [[ "$total" =~ ^[0-9]+$ && "$total" -gt 0 ]] || return 1
+
+  awk -v line="$line" '
+    BEGIN {
+      if (match(line, /[0-9]+ bytes .* copied/)) {
+        copied = substr(line, RSTART, RLENGTH)
+        sub(/ bytes.*/, "", copied)
+      } else {
+        exit 1
+      }
+
+      speed_text = ""
+      speed_bps = ""
+      if (match(line, /[0-9]+(\.[0-9]+)?[[:space:]]*[KMGTPE]?i?B\/s/)) {
+        speed_text = substr(line, RSTART, RLENGTH)
+        value = speed_text
+        sub(/[[:space:]]*[KMGTPE]?i?B\/s/, "", value)
+        unit = speed_text
+        sub(/^[0-9]+(\.[0-9]+)?[[:space:]]*/, "", unit)
+        sub(/\/s$/, "", unit)
+
+        mult = 1
+        if (unit == "kB") mult = 1000
+        else if (unit == "KB") mult = 1000
+        else if (unit == "MB") mult = 1000 * 1000
+        else if (unit == "GB") mult = 1000 * 1000 * 1000
+        else if (unit == "TB") mult = 1000 * 1000 * 1000 * 1000
+        else if (unit == "PB") mult = 1000 * 1000 * 1000 * 1000 * 1000
+        else if (unit == "KiB") mult = 1024
+        else if (unit == "MiB") mult = 1024 * 1024
+        else if (unit == "GiB") mult = 1024 * 1024 * 1024
+        else if (unit == "TiB") mult = 1024 * 1024 * 1024 * 1024
+        else if (unit == "PiB") mult = 1024 * 1024 * 1024 * 1024 * 1024
+        speed_bps = int(value * mult)
+      }
+
+      printf "%s\t%s\t%s\n", copied, speed_text, speed_bps
+    }'
+}
+
+dd_progress_parser(){
+  local src_size="$1" line parsed copied speed_text speed_bps compact=0 printed=0
+
+  if [[ "${DEBUG:-0}" != "1" ]] && { [[ -t 2 ]] || [[ "${VMIGRATE_PROGRESS_COMPACT:-0}" == "1" ]]; }; then
+    compact=1
+  fi
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    if parsed="$(parse_dd_progress_line "$line" "$src_size" 2>/dev/null)"; then
+      IFS=$'\t' read -r copied speed_text speed_bps <<< "$parsed"
+      if (( compact )); then
+        printf '\r\033[K'
+        render_dd_progress_line "$copied" "$src_size" "$speed_text" "$speed_bps"
+      else
+        render_dd_progress_line "$copied" "$src_size" "$speed_text" "$speed_bps"
+        printf '\n'
+      fi
+      printed=1
+    else
+      (( printed && compact )) && printf '\n'
+      printf '%s\n' "$line"
+      printed=0
+    fi
+  done
+
+  (( printed && compact )) && printf '\n'
+  return 0
+}
+
 format_bytes_short(){
   local h="$1"
 
@@ -2631,9 +2743,9 @@ dd_full_copy(){
   set -o | grep -q '^pipefail[[:space:]]*on$' && old_pipefail=1
   set -o pipefail
 
-  dd if="$SRC_DISK" bs=4M iflag=fullblock status=progress \
+  dd if="$SRC_DISK" bs=4M iflag=fullblock status=progress 2> >(tr '\r' '\n' | dd_progress_parser "$src_size" >&2) \
     | ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${TARGET_SSH_USER}@${TARGET_HOST}" \
-        "dd of='$TARGET_DISK' bs=4M iflag=fullblock conv=fsync status=progress"
+        "dd of='$TARGET_DISK' bs=4M iflag=fullblock conv=fsync status=none"
 
   local rc=$?
 
