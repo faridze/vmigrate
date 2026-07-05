@@ -173,6 +173,39 @@ VMIGRATE_CONFIG=/opt/vmigrate/migrations/VM_NAME/RUN_ID/config ./vmigrate report
 
 ---
 
+## DD defaults for new runs
+
+`vmigrate` stores optional dd defaults in `vmigrate.defaults` with mode `600`. These defaults are only used when a new run config is initialized; an existing run config always wins.
+
+Show or change the persisted defaults:
+
+```bash
+./vmigrate defaults show
+./vmigrate defaults set DD_THROTTLE 1
+./vmigrate defaults set DD_THROTTLE_M 2000
+./vmigrate defaults unset DD_THROTTLE
+```
+
+Use one-time environment overrides for a single new run:
+
+```bash
+VMIGRATE_DD_THROTTLE=1 VMIGRATE_DD_THROTTLE_M=2000 ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+```
+
+Production-safe opt-in throttling usually starts with:
+
+```text
+DD_THROTTLE=1
+DD_THROTTLE_REQUIRED=0
+DD_THROTTLE_S=512
+DD_THROTTLE_W=2
+DD_THROTTLE_M=2000
+```
+
+The built-in default remains `DD_THROTTLE=0`, so throttling is disabled unless you opt in with a persisted default or a `VMIGRATE_DD_*` override.
+
+---
+
 ## Destination per-run workspace
 
 Each migration run gets its own destination workspace:
