@@ -5,6 +5,7 @@ set -Eeuo pipefail
 VERSION="1.5.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
+DEFAULTS_FILE="${SCRIPT_DIR}/vmigrate.defaults"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
 
 active_run_dir(){
@@ -61,6 +62,7 @@ Usage:
   ./vmigrate show
   ./vmigrate get KEY
   ./vmigrate set KEY VALUE
+  ./vmigrate defaults show|get|set|unset
   ./vmigrate list
   ./vmigrate history [VM_NAME] [--latest] [--failed]
   ./vmigrate active
@@ -126,7 +128,8 @@ Command summary:
   resume                          Analyze active run and suggest next step
   resume --run                    Run the next safe resume step automatically
   finalize                        Guided interactive post-FULL final workflow
-  get/set                         Show or update whitelisted config keys
+  get/set                         Show or update active-run whitelisted config keys
+  defaults                        Show or update whitelisted defaults for new runs
   set-nbd-port auto               Pick a free per-run NBD port
   remote-export                   Start/reuse destination NBD export
   remote-dst-status               Show destination VM/NBD status
@@ -178,7 +181,7 @@ Help topics:
   ./vmigrate help batch       Sequential batch FULL workflow
   ./vmigrate help resume      Continue after interruption
   ./vmigrate help finalize    Guided interactive post-FULL final workflow
-  ./vmigrate help config      Safe config getter/setter and dd settings
+  ./vmigrate help config      Safe config getter/setter and dd defaults
   ./vmigrate help ports       Automatic/manual NBD port handling
   ./vmigrate help status      Status, reports, jobs, history
   ./vmigrate help cleanup     Safe cleanup and stale cleanup
@@ -416,17 +419,25 @@ EOF
 Config getter/setter
 ====================
 
-Show a whitelisted config value:
+Active run config:
   ./vmigrate get DD_THROTTLE
   ./vmigrate get DD_BS
-
-Update dd full copy settings:
   ./vmigrate set DD_THROTTLE 1
   ./vmigrate set DD_THROTTLE_M 2000
-  ./vmigrate set DD_BS 24M
-  ./vmigrate set DD_THROTTLE_REQUIRED 1
+
+Persistent defaults for new runs:
+  ./vmigrate defaults show
+  ./vmigrate defaults get DD_THROTTLE
+  ./vmigrate defaults set DD_THROTTLE 1
+  ./vmigrate defaults set DD_THROTTLE_M 2000
+  ./vmigrate defaults set DD_BS 4M
+  ./vmigrate defaults unset DD_THROTTLE
+
+One-time defaults for a new create or batch-full run:
+  VMIGRATE_DD_THROTTLE=1 VMIGRATE_DD_THROTTLE_M=2000 ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
 
 Notes:
+  Existing run config keys are never overwritten by defaults or VMIGRATE_* overrides.
   DD_THROTTLE=1 enables local throttle between source dd and ssh.
   DD_THROTTLE_REQUIRED=1 makes missing throttle a hard error.
   DD_BS controls source and remote dd block size.
@@ -687,6 +698,148 @@ dd_config_default(){
     DD_THROTTLE_W) printf '%s\n' "2" ;;
     DD_THROTTLE_M) printf '%s\n' "2000" ;;
     *) return 1 ;;
+  esac
+}
+
+dd_config_keys(){
+  printf '%s\n' \
+    DD_BS \
+    DD_LOW_PRIORITY \
+    DD_NICE \
+    DD_IONICE_CLASS \
+    DD_IONICE_PRIO \
+    DD_THROTTLE \
+    DD_THROTTLE_REQUIRED \
+    DD_THROTTLE_S \
+    DD_THROTTLE_W \
+    DD_THROTTLE_M
+}
+
+defaults_get_raw(){
+  local key="$1"
+  [[ -f "$DEFAULTS_FILE" ]] || return 0
+  awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$DEFAULTS_FILE"
+}
+
+defaults_write_key(){
+  local key="$1" val="$2" tmp
+  dd_config_key_allowed "$key" || die "Defaults key is not settable: $key"
+  dd_config_value_valid "$key" "$val" || die "Invalid value for $key: $val"
+  tmp="$(mktemp)"
+  [[ -f "$DEFAULTS_FILE" ]] && grep -v -E "^${key}=" "$DEFAULTS_FILE" > "$tmp" || true
+  printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$DEFAULTS_FILE"
+  chmod 600 "$DEFAULTS_FILE" 2>/dev/null || true
+}
+
+defaults_delete_key(){
+  local key="$1" tmp
+  dd_config_key_allowed "$key" || die "Defaults key is not unsettable: $key"
+  tmp="$(mktemp)"
+  [[ -f "$DEFAULTS_FILE" ]] && grep -v -E "^${key}=" "$DEFAULTS_FILE" > "$tmp" || true
+  mv "$tmp" "$DEFAULTS_FILE"
+  chmod 600 "$DEFAULTS_FILE" 2>/dev/null || true
+}
+
+dd_config_env_name(){ printf 'VMIGRATE_%s\n' "$1"; }
+
+warn_config(){ printf 'WARN %s\n' "$*" >&2; }
+
+dd_config_initial_value(){
+  local key="$1" env_name env_val default_val saved_val
+  dd_config_key_allowed "$key" || return 1
+  default_val="$(dd_config_default "$key")" || return 1
+  env_name="$(dd_config_env_name "$key")"
+
+  if env_val="$(printenv "$env_name")"; then
+    if dd_config_value_valid "$key" "$env_val"; then
+      printf '%s\n' "$env_val"
+      return 0
+    fi
+    warn_config "Invalid $env_name=$env_val; ignoring environment override"
+  fi
+
+  saved_val="$(defaults_get_raw "$key" || true)"
+  if [[ -n "$saved_val" ]]; then
+    if dd_config_value_valid "$key" "$saved_val"; then
+      printf '%s\n' "$saved_val"
+      return 0
+    fi
+    warn_config "Invalid saved default $key=$saved_val in $DEFAULTS_FILE; using built-in default"
+  fi
+
+  printf '%s\n' "$default_val"
+}
+
+write_initial_dd_key(){
+  local key="$1" val
+  [[ -z "$(get_conf "$key")" ]] || return 0
+  val="$(dd_config_initial_value "$key")" || return 1
+  write_key "$key" "$val"
+}
+
+write_initial_dd_defaults(){
+  local key
+  while IFS= read -r key; do
+    write_initial_dd_key "$key"
+  done < <(dd_config_keys)
+}
+
+initial_dd_defaults_text(){
+  local key val
+  while IFS= read -r key; do
+    val="$(dd_config_initial_value "$key")" || return 1
+    printf '%s=%s\n' "$key" "$val"
+  done < <(dd_config_keys)
+}
+
+defaults_get(){
+  local key="$1" val
+  dd_config_key_allowed "$key" || die "Defaults key is not readable: $key"
+  val="$(defaults_get_raw "$key" || true)"
+  if [[ -n "$val" ]]; then
+    if dd_config_value_valid "$key" "$val"; then
+      printf '%s\n' "$val"
+      return 0
+    fi
+    warn_config "Invalid saved default $key=$val in $DEFAULTS_FILE; showing built-in default"
+  fi
+  dd_config_default "$key"
+}
+
+defaults_show(){
+  local key
+  while IFS= read -r key; do
+    printf '%s=%s\n' "$key" "$(defaults_get "$key")"
+  done < <(dd_config_keys)
+}
+
+defaults_cmd(){
+  local sub="${1:-show}" key="${2:-}" val="${3:-}"
+  case "$sub" in
+    show)
+      defaults_show
+      ;;
+    get)
+      [[ -n "$key" ]] || die "Usage: ./vmigrate defaults get KEY"
+      defaults_get "$key"
+      ;;
+    set)
+      [[ -n "$key" && -n "$val" ]] || die "Usage: ./vmigrate defaults set KEY VALUE"
+      defaults_write_key "$key" "$val"
+      ok "default $key=$val"
+      ;;
+    unset)
+      [[ -n "$key" ]] || die "Usage: ./vmigrate defaults unset KEY"
+      defaults_delete_key "$key"
+      ok "default unset: $key"
+      ;;
+    -h|--help|help)
+      help_cmd config
+      ;;
+    *)
+      die "Usage: ./vmigrate defaults show|get|set|unset"
+      ;;
   esac
 }
 
@@ -1042,16 +1195,7 @@ NBD_EXPORT=vm-${target_id}
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
 BACKUP_METHOD=drive-backup
-DD_BS=4M
-DD_LOW_PRIORITY=1
-DD_NICE=19
-DD_IONICE_CLASS=2
-DD_IONICE_PRIO=7
-DD_THROTTLE=0
-DD_THROTTLE_REQUIRED=0
-DD_THROTTLE_S=512
-DD_THROTTLE_W=2
-DD_THROTTLE_M=2000
+$(initial_dd_defaults_text)
 EOF
   chmod 600 "$CONFIG_FILE"
   ok "Config written: $CONFIG_FILE"
@@ -1084,16 +1228,7 @@ ensure_base_config(){
     [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
     [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
     [[ -n "$(get_conf BACKUP_METHOD)" ]] || write_key BACKUP_METHOD drive-backup
-    [[ -n "$(get_conf DD_BS)" ]] || write_key DD_BS 4M
-    [[ -n "$(get_conf DD_LOW_PRIORITY)" ]] || write_key DD_LOW_PRIORITY 1
-    [[ -n "$(get_conf DD_NICE)" ]] || write_key DD_NICE 19
-    [[ -n "$(get_conf DD_IONICE_CLASS)" ]] || write_key DD_IONICE_CLASS 2
-    [[ -n "$(get_conf DD_IONICE_PRIO)" ]] || write_key DD_IONICE_PRIO 7
-    [[ -n "$(get_conf DD_THROTTLE)" ]] || write_key DD_THROTTLE 0
-    [[ -n "$(get_conf DD_THROTTLE_REQUIRED)" ]] || write_key DD_THROTTLE_REQUIRED 0
-    [[ -n "$(get_conf DD_THROTTLE_S)" ]] || write_key DD_THROTTLE_S 512
-    [[ -n "$(get_conf DD_THROTTLE_W)" ]] || write_key DD_THROTTLE_W 2
-    [[ -n "$(get_conf DD_THROTTLE_M)" ]] || write_key DD_THROTTLE_M 2000
+    write_initial_dd_defaults
   else
     vm="$vm_arg"
     [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
@@ -1118,16 +1253,7 @@ NBD_EXPORT=vm-${target_id}
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
 BACKUP_METHOD=drive-backup
-DD_BS=4M
-DD_LOW_PRIORITY=1
-DD_NICE=19
-DD_IONICE_CLASS=2
-DD_IONICE_PRIO=7
-DD_THROTTLE=0
-DD_THROTTLE_REQUIRED=0
-DD_THROTTLE_S=512
-DD_THROTTLE_W=2
-DD_THROTTLE_M=2000
+$(initial_dd_defaults_text)
 EOF
     chmod 600 "$CONFIG_FILE"
   fi
@@ -1281,16 +1407,7 @@ remote_prepare(){
   [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
   [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
   [[ -n "$(get_conf BACKUP_METHOD)" ]] || write_key BACKUP_METHOD drive-backup
-  [[ -n "$(get_conf DD_BS)" ]] || write_key DD_BS 4M
-  [[ -n "$(get_conf DD_LOW_PRIORITY)" ]] || write_key DD_LOW_PRIORITY 1
-  [[ -n "$(get_conf DD_NICE)" ]] || write_key DD_NICE 19
-  [[ -n "$(get_conf DD_IONICE_CLASS)" ]] || write_key DD_IONICE_CLASS 2
-  [[ -n "$(get_conf DD_IONICE_PRIO)" ]] || write_key DD_IONICE_PRIO 7
-  [[ -n "$(get_conf DD_THROTTLE)" ]] || write_key DD_THROTTLE 0
-  [[ -n "$(get_conf DD_THROTTLE_REQUIRED)" ]] || write_key DD_THROTTLE_REQUIRED 0
-  [[ -n "$(get_conf DD_THROTTLE_S)" ]] || write_key DD_THROTTLE_S 512
-  [[ -n "$(get_conf DD_THROTTLE_W)" ]] || write_key DD_THROTTLE_W 2
-  [[ -n "$(get_conf DD_THROTTLE_M)" ]] || write_key DD_THROTTLE_M 2000
+  write_initial_dd_defaults
 
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
@@ -4890,6 +5007,7 @@ case "$cmd" in
   show) show_config ;;
   get) get_config "${1:-}" ;;
   set) set_config "${1:-}" "${2:-}" ;;
+  defaults) defaults_cmd "$@" ;;
   list) runs_list ;;
   history) history_cmd "$@" ;;
   active) run_active ;;
