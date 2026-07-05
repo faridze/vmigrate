@@ -53,12 +53,14 @@ vmigrate v${VERSION}
 
 Usage:
   ./vmigrate version
-  ./vmigrate help [create|manual|batch|resume|finalize|ports|status|cleanup|upgrade]
+  ./vmigrate help [create|manual|batch|resume|finalize|config|ports|status|cleanup|upgrade]
   ./vmigrate upgrade-check
   ./vmigrate upgrade
   ./vmigrate discover [VM_NAME] [--yes]
   ./vmigrate init
   ./vmigrate show
+  ./vmigrate get KEY
+  ./vmigrate set KEY VALUE
   ./vmigrate list
   ./vmigrate history [VM_NAME] [--latest] [--failed]
   ./vmigrate active
@@ -124,6 +126,7 @@ Command summary:
   resume                          Analyze active run and suggest next step
   resume --run                    Run the next safe resume step automatically
   finalize                        Guided interactive post-FULL final workflow
+  get/set                         Show or update whitelisted config keys
   set-nbd-port auto               Pick a free per-run NBD port
   remote-export                   Start/reuse destination NBD export
   remote-dst-status               Show destination VM/NBD status
@@ -175,6 +178,7 @@ Help topics:
   ./vmigrate help batch       Sequential batch FULL workflow
   ./vmigrate help resume      Continue after interruption
   ./vmigrate help finalize    Guided interactive post-FULL final workflow
+  ./vmigrate help config      Safe config getter/setter and dd settings
   ./vmigrate help ports       Automatic/manual NBD port handling
   ./vmigrate help status      Status, reports, jobs, history
   ./vmigrate help cleanup     Safe cleanup and stale cleanup
@@ -185,6 +189,7 @@ Common status commands:
   ./vmigrate list             List all runs
   ./vmigrate history          Show latest run per VM
   ./vmigrate show             Show active run config
+  ./vmigrate get DD_BS        Show a whitelisted config value
   ./vmigrate resume           Show next recommended step
   ./vmigrate report           Show migration report
 
@@ -406,6 +411,28 @@ Safety:
 EOF
       ;;
 
+    config)
+      cat <<EOF
+Config getter/setter
+====================
+
+Show a whitelisted config value:
+  ./vmigrate get DD_THROTTLE
+  ./vmigrate get DD_BS
+
+Update dd full copy settings:
+  ./vmigrate set DD_THROTTLE 1
+  ./vmigrate set DD_THROTTLE_M 2000
+  ./vmigrate set DD_BS 24M
+  ./vmigrate set DD_THROTTLE_REQUIRED 1
+
+Notes:
+  DD_THROTTLE=1 enables local throttle between source dd and ssh.
+  DD_THROTTLE_REQUIRED=1 makes missing throttle a hard error.
+  DD_BS controls source and remote dd block size.
+EOF
+      ;;
+
     ports)
       cat <<EOF
 NBD port management
@@ -597,10 +624,16 @@ load_config(){
   AUTOSSH_MONITOR_PORT="${AUTOSSH_MONITOR_PORT:-20000}"
   BACKUP_METHOD="${BACKUP_METHOD:-drive-backup}"
   FULL_METHOD="${FULL_METHOD:-auto}"
+  DD_BS="${DD_BS:-4M}"
   DD_LOW_PRIORITY="${DD_LOW_PRIORITY:-1}"
   DD_NICE="${DD_NICE:-19}"
   DD_IONICE_CLASS="${DD_IONICE_CLASS:-2}"
   DD_IONICE_PRIO="${DD_IONICE_PRIO:-7}"
+  DD_THROTTLE="${DD_THROTTLE:-0}"
+  DD_THROTTLE_REQUIRED="${DD_THROTTLE_REQUIRED:-0}"
+  DD_THROTTLE_S="${DD_THROTTLE_S:-512}"
+  DD_THROTTLE_W="${DD_THROTTLE_W:-2}"
+  DD_THROTTLE_M="${DD_THROTTLE_M:-2000}"
   QMP_TIMEOUT="${QMP_TIMEOUT:-20}"
   CHECK_TIMEOUT="${CHECK_TIMEOUT:-8}"
   NBD_IO_TIMEOUT="${NBD_IO_TIMEOUT:-20}"
@@ -608,11 +641,81 @@ load_config(){
 
 get_conf(){ local key="$1"; [[ -f "$CONFIG_FILE" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$CONFIG_FILE"; }
 write_key(){
-  local key="$1" val="$2" tmp
+  local key="$1" val="$2" tmp mode
   tmp="$(mktemp)"
+  mode="$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || true)"
   [[ -f "$CONFIG_FILE" ]] && grep -v -E "^${key}=" "$CONFIG_FILE" > "$tmp" || true
   printf '%s=%s\n' "$key" "$val" >> "$tmp"
   mv "$tmp" "$CONFIG_FILE"
+  if [[ -n "$mode" ]]; then
+    chmod "$mode" "$CONFIG_FILE" 2>/dev/null || true
+  else
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+  fi
+}
+
+dd_config_key_allowed(){
+  case "$1" in
+    DD_BS|DD_LOW_PRIORITY|DD_NICE|DD_IONICE_CLASS|DD_IONICE_PRIO|DD_THROTTLE|DD_THROTTLE_REQUIRED|DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+dd_config_value_valid(){
+  local key="$1" val="$2"
+  case "$key" in
+    DD_BS) [[ "$val" =~ ^[1-9][0-9]*[KMG]?$ ]] ;;
+    DD_LOW_PRIORITY|DD_THROTTLE|DD_THROTTLE_REQUIRED) [[ "$val" =~ ^[01]$ ]] ;;
+    DD_NICE) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 19 )) ;;
+    DD_IONICE_CLASS) [[ "$val" =~ ^[23]$ ]] ;;
+    DD_IONICE_PRIO) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 7 )) ;;
+    DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M) [[ "$val" =~ ^[1-9][0-9]*$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+dd_config_default(){
+  case "$1" in
+    DD_BS) printf '%s\n' "4M" ;;
+    DD_LOW_PRIORITY) printf '%s\n' "1" ;;
+    DD_NICE) printf '%s\n' "19" ;;
+    DD_IONICE_CLASS) printf '%s\n' "2" ;;
+    DD_IONICE_PRIO) printf '%s\n' "7" ;;
+    DD_THROTTLE) printf '%s\n' "0" ;;
+    DD_THROTTLE_REQUIRED) printf '%s\n' "0" ;;
+    DD_THROTTLE_S) printf '%s\n' "512" ;;
+    DD_THROTTLE_W) printf '%s\n' "2" ;;
+    DD_THROTTLE_M) printf '%s\n' "2000" ;;
+    *) return 1 ;;
+  esac
+}
+
+set_config(){
+  local key="${1:-}" val="${2:-}"
+  [[ -n "$key" && -n "$val" ]] || die "Usage: ./vmigrate set KEY VALUE"
+  [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE"
+  dd_config_key_allowed "$key" || die "Config key is not settable: $key"
+  dd_config_value_valid "$key" "$val" || die "Invalid value for $key: $val"
+  write_key "$key" "$val"
+  ok "$key=$val"
+}
+
+get_config(){
+  local key="${1:-}" val
+  [[ -n "$key" ]] || die "Usage: ./vmigrate get KEY"
+  dd_config_key_allowed "$key" || die "Config key is not readable: $key"
+
+  val="$(get_conf "$key" || true)"
+  if [[ -z "$val" ]]; then
+    val="$(dd_config_default "$key")" || die "No default for config key: $key"
+  fi
+
+  if ! dd_config_value_valid "$key" "$val"; then
+    warn "Invalid saved value for $key: $val; showing default"
+    val="$(dd_config_default "$key")" || die "No default for config key: $key"
+  fi
+
+  printf '%s\n' "$val"
 }
 
 now_ts(){ date '+%Y-%m-%d %H:%M:%S %z'; }
@@ -939,10 +1042,16 @@ NBD_EXPORT=vm-${target_id}
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
 BACKUP_METHOD=drive-backup
+DD_BS=4M
 DD_LOW_PRIORITY=1
 DD_NICE=19
 DD_IONICE_CLASS=2
 DD_IONICE_PRIO=7
+DD_THROTTLE=0
+DD_THROTTLE_REQUIRED=0
+DD_THROTTLE_S=512
+DD_THROTTLE_W=2
+DD_THROTTLE_M=2000
 EOF
   chmod 600 "$CONFIG_FILE"
   ok "Config written: $CONFIG_FILE"
@@ -975,10 +1084,16 @@ ensure_base_config(){
     [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
     [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
     [[ -n "$(get_conf BACKUP_METHOD)" ]] || write_key BACKUP_METHOD drive-backup
+    [[ -n "$(get_conf DD_BS)" ]] || write_key DD_BS 4M
     [[ -n "$(get_conf DD_LOW_PRIORITY)" ]] || write_key DD_LOW_PRIORITY 1
     [[ -n "$(get_conf DD_NICE)" ]] || write_key DD_NICE 19
     [[ -n "$(get_conf DD_IONICE_CLASS)" ]] || write_key DD_IONICE_CLASS 2
     [[ -n "$(get_conf DD_IONICE_PRIO)" ]] || write_key DD_IONICE_PRIO 7
+    [[ -n "$(get_conf DD_THROTTLE)" ]] || write_key DD_THROTTLE 0
+    [[ -n "$(get_conf DD_THROTTLE_REQUIRED)" ]] || write_key DD_THROTTLE_REQUIRED 0
+    [[ -n "$(get_conf DD_THROTTLE_S)" ]] || write_key DD_THROTTLE_S 512
+    [[ -n "$(get_conf DD_THROTTLE_W)" ]] || write_key DD_THROTTLE_W 2
+    [[ -n "$(get_conf DD_THROTTLE_M)" ]] || write_key DD_THROTTLE_M 2000
   else
     vm="$vm_arg"
     [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
@@ -1003,10 +1118,16 @@ NBD_EXPORT=vm-${target_id}
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
 BACKUP_METHOD=drive-backup
+DD_BS=4M
 DD_LOW_PRIORITY=1
 DD_NICE=19
 DD_IONICE_CLASS=2
 DD_IONICE_PRIO=7
+DD_THROTTLE=0
+DD_THROTTLE_REQUIRED=0
+DD_THROTTLE_S=512
+DD_THROTTLE_W=2
+DD_THROTTLE_M=2000
 EOF
     chmod 600 "$CONFIG_FILE"
   fi
@@ -1028,7 +1149,9 @@ Remote run dir : ${REMOTE_RUN_DIR:-/root/vmigrate}
 NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 Tunnel mode    : $TUNNEL_MODE
 Backup method  : ${BACKUP_METHOD:-drive-backup}
+DD block size  : ${DD_BS:-4M}
 DD priority    : low=${DD_LOW_PRIORITY:-1}, nice=${DD_NICE:-19}, ionice=${DD_IONICE_CLASS:-2}:${DD_IONICE_PRIO:-7}
+DD throttle    : enabled=${DD_THROTTLE:-0}, required=${DD_THROTTLE_REQUIRED:-0}, s=${DD_THROTTLE_S:-512}, w=${DD_THROTTLE_W:-2}, m=${DD_THROTTLE_M:-2000}
 QMP timeout    : ${QMP_TIMEOUT:-20}s
 Check timeout  : ${CHECK_TIMEOUT:-8}s
 NBD I/O timeout: ${NBD_IO_TIMEOUT:-20}s
@@ -1158,10 +1281,16 @@ remote_prepare(){
   [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
   [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
   [[ -n "$(get_conf BACKUP_METHOD)" ]] || write_key BACKUP_METHOD drive-backup
+  [[ -n "$(get_conf DD_BS)" ]] || write_key DD_BS 4M
   [[ -n "$(get_conf DD_LOW_PRIORITY)" ]] || write_key DD_LOW_PRIORITY 1
   [[ -n "$(get_conf DD_NICE)" ]] || write_key DD_NICE 19
   [[ -n "$(get_conf DD_IONICE_CLASS)" ]] || write_key DD_IONICE_CLASS 2
   [[ -n "$(get_conf DD_IONICE_PRIO)" ]] || write_key DD_IONICE_PRIO 7
+  [[ -n "$(get_conf DD_THROTTLE)" ]] || write_key DD_THROTTLE 0
+  [[ -n "$(get_conf DD_THROTTLE_REQUIRED)" ]] || write_key DD_THROTTLE_REQUIRED 0
+  [[ -n "$(get_conf DD_THROTTLE_S)" ]] || write_key DD_THROTTLE_S 512
+  [[ -n "$(get_conf DD_THROTTLE_W)" ]] || write_key DD_THROTTLE_W 2
+  [[ -n "$(get_conf DD_THROTTLE_M)" ]] || write_key DD_THROTTLE_M 2000
 
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
@@ -2738,6 +2867,11 @@ src_disk_is_raw_block(){
 
 
 validate_dd_priority_config(){
+  if ! [[ "${DD_BS:-4M}" =~ ^[1-9][0-9]*[KMG]?$ ]]; then
+    warn "Invalid DD_BS=${DD_BS:-}; using 4M"
+    DD_BS=4M
+  fi
+
   case "${DD_LOW_PRIORITY:-1}" in
     0|1) ;;
     *) warn "Invalid DD_LOW_PRIORITY=${DD_LOW_PRIORITY}; using 1"; DD_LOW_PRIORITY=1 ;;
@@ -2759,6 +2893,31 @@ validate_dd_priority_config(){
       DD_IONICE_PRIO=7
     fi
   fi
+
+  case "${DD_THROTTLE:-0}" in
+    0|1) ;;
+    *) warn "Invalid DD_THROTTLE=${DD_THROTTLE:-}; using 0"; DD_THROTTLE=0 ;;
+  esac
+
+  case "${DD_THROTTLE_REQUIRED:-0}" in
+    0|1) ;;
+    *) warn "Invalid DD_THROTTLE_REQUIRED=${DD_THROTTLE_REQUIRED:-}; using 0"; DD_THROTTLE_REQUIRED=0 ;;
+  esac
+
+  if ! [[ "${DD_THROTTLE_S:-512}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_THROTTLE_S=${DD_THROTTLE_S:-}; using 512"
+    DD_THROTTLE_S=512
+  fi
+
+  if ! [[ "${DD_THROTTLE_W:-2}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_THROTTLE_W=${DD_THROTTLE_W:-}; using 2"
+    DD_THROTTLE_W=2
+  fi
+
+  if ! [[ "${DD_THROTTLE_M:-2000}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_THROTTLE_M=${DD_THROTTLE_M:-}; using 2000"
+    DD_THROTTLE_M=2000
+  fi
 }
 
 dd_priority_info(){
@@ -2772,6 +2931,40 @@ dd_priority_info(){
   else
     ok "dd low priority enabled: nice=${DD_NICE} ionice=${DD_IONICE_CLASS}:${DD_IONICE_PRIO}"
   fi
+}
+
+dd_throttle_info(){
+  if [[ "${DD_THROTTLE:-0}" != "1" ]]; then
+    warn "dd throttle disabled"
+    return 0
+  fi
+
+  ok "dd throttle enabled: -s ${DD_THROTTLE_S} -w ${DD_THROTTLE_W} -m ${DD_THROTTLE_M}"
+
+  if ! command -v throttle >/dev/null 2>&1; then
+    if [[ "${DD_THROTTLE_REQUIRED:-0}" == "1" ]]; then
+      die "DD_THROTTLE=1 but throttle was not found and DD_THROTTLE_REQUIRED=1"
+    fi
+    warn "throttle not found; continuing without dd throttle"
+  fi
+}
+
+dd_throttle_stream(){
+  if [[ "${DD_THROTTLE:-0}" != "1" ]]; then
+    cat
+    return 0
+  fi
+
+  if ! command -v throttle >/dev/null 2>&1; then
+    if [[ "${DD_THROTTLE_REQUIRED:-0}" == "1" ]]; then
+      die "DD_THROTTLE=1 but throttle was not found and DD_THROTTLE_REQUIRED=1"
+    fi
+    warn "throttle not found; continuing without dd throttle"
+    cat
+    return 0
+  fi
+
+  throttle -s "$DD_THROTTLE_S" -w "$DD_THROTTLE_W" -m "$DD_THROTTLE_M"
 }
 
 dd_priority_apply_current(){
@@ -2809,8 +3002,9 @@ dd_priority_run_local(){
 }
 
 dd_priority_prefix_remote(){
-  local q_target q_low q_nice q_class q_prio
+  local q_target q_bs q_low q_nice q_class q_prio
   q_target="$(shell_quote "$TARGET_DISK")"
+  q_bs="$(shell_quote "$DD_BS")"
   q_low="$(shell_quote "$DD_LOW_PRIORITY")"
   q_nice="$(shell_quote "$DD_NICE")"
   q_class="$(shell_quote "$DD_IONICE_CLASS")"
@@ -2819,10 +3013,11 @@ dd_priority_prefix_remote(){
   cat <<EOF
 sh -c '
 target="\$1"
-low="\$2"
-nice_value="\$3"
-ionice_class="\$4"
-ionice_prio="\$5"
+bs="\$2"
+low="\$3"
+nice_value="\$4"
+ionice_class="\$5"
+ionice_prio="\$6"
 
 if [ "\$low" = "1" ]; then
   if command -v ionice >/dev/null 2>&1; then
@@ -2838,14 +3033,14 @@ if [ "\$low" = "1" ]; then
   if command -v renice >/dev/null 2>&1; then
     renice -n "\$nice_value" -p "\$\$" >/dev/null 2>&1 || echo "WARN Could not set remote nice priority; continuing" >&2
   elif command -v nice >/dev/null 2>&1; then
-    exec nice -n "\$nice_value" dd of="\$target" bs=4M iflag=fullblock conv=fsync status=none
+    exec nice -n "\$nice_value" dd of="\$target" bs="\$bs" iflag=fullblock conv=fsync status=none
   else
     echo "WARN nice not found on remote; continuing without CPU priority" >&2
   fi
 fi
 
-exec dd of="\$target" bs=4M iflag=fullblock conv=fsync status=none
-' sh $q_target $q_low $q_nice $q_class $q_prio
+exec dd of="\$target" bs="\$bs" iflag=fullblock conv=fsync status=none
+' sh $q_target $q_bs $q_low $q_nice $q_class $q_prio
 EOF
 }
 
@@ -2874,6 +3069,7 @@ dd_full_copy(){
   echo "Target : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_DISK}"
   echo "Size   : $src_size bytes"
   dd_priority_info
+  dd_throttle_info
   warn "dd full copy has no QMP block job. Do not interrupt it."
 
   local old_pipefail=0
@@ -2882,7 +3078,8 @@ dd_full_copy(){
 
   remote_dd_cmd="$(dd_priority_prefix_remote)"
 
-  dd_priority_run_local dd if="$SRC_DISK" bs=4M iflag=fullblock status=progress 2> >(tr '\r' '\n' | dd_progress_parser "$src_size" >&2) \
+  dd_priority_run_local dd if="$SRC_DISK" bs="$DD_BS" iflag=fullblock status=progress 2> >(tr '\r' '\n' | dd_progress_parser "$src_size" >&2) \
+    | dd_throttle_stream \
     | ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${TARGET_SSH_USER}@${TARGET_HOST}" \
         "$remote_dd_cmd"
 
@@ -4691,6 +4888,8 @@ case "$cmd" in
   init) init_config ;;
   discover) discover "$@" ;;
   show) show_config ;;
+  get) get_config "${1:-}" ;;
+  set) set_config "${1:-}" "${2:-}" ;;
   list) runs_list ;;
   history) history_cmd "$@" ;;
   active) run_active ;;
