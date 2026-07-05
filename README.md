@@ -6,7 +6,7 @@ Low-downtime VM migration helper for KVM/Virtualizor-style source hosts and Prox
 
 The main goal is to copy a source VM disk to a destination disk with QEMU block jobs, NBD, SSH/autossh tunneling, dirty bitmaps, verification, reporting, cleanup, and safe resume guidance.
 
-Use placeholders such as `VM_NAME`, `TARGET_ID`, `TARGET_HOST`, and `SSH_PORT` in the examples below. Do not put real public IP addresses in shared documentation or scripts.
+Use placeholders such as `VM_NAME`, `TARGET_ID`, `TARGET_HOST`, and `SSH_PORT` in examples. Do not put real public IP addresses in shared documentation, scripts, release notes, screenshots, or issue reports.
 
 ---
 
@@ -34,7 +34,7 @@ What it does:
 6. Selects an automatic per-run NBD port unless disabled.
 7. Checks source and destination readiness.
 8. Opens the destination NBD export.
-9. Starts or reuses a healthy SSH tunnel.
+9. Starts or reuses a healthy SSH/autossh tunnel.
 10. Creates or verifies the dirty bitmap.
 11. Starts the FULL sync and waits for completion.
 12. Offers optional incremental sync before cutover.
@@ -92,6 +92,20 @@ RHEL/AlmaLinux/Rocky:
 dnf install -y autossh
 ```
 
+Optional for throttled FULL copy:
+
+```bash
+apt install -y throttle
+```
+
+or:
+
+```bash
+dnf install -y throttle
+```
+
+If `DD_THROTTLE_REQUIRED=0`, missing `throttle` only prints a warning and continues without throttling.
+
 Check the destination VM status:
 
 ```bash
@@ -99,6 +113,33 @@ ssh -p SSH_PORT root@TARGET_HOST "qm status TARGET_ID"
 ```
 
 The destination VM should normally be stopped before NBD export. If it is running, `vmigrate` asks before stopping it.
+
+---
+
+## Install or update from git
+
+Clone:
+
+```bash
+git clone https://github.com/faridze/vmigrate.git /opt/vmigrate
+cd /opt/vmigrate
+chmod +x vmigrate vmigrate-agent
+```
+
+Update an existing git checkout:
+
+```bash
+cd /opt/vmigrate
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+./vmigrate version
+./vmigrate upgrade-check
+```
+
+`upgrade-check` expects the install path to be a real git checkout and the working tree to be clean.
+
+Local runtime/default files such as `vmigrate.defaults`, `vmigrate.env`, run directories, and lock files should not be committed.
 
 ---
 
@@ -175,34 +216,192 @@ VMIGRATE_CONFIG=/opt/vmigrate/migrations/VM_NAME/RUN_ID/config ./vmigrate report
 
 ## DD defaults for new runs
 
-`vmigrate` stores optional dd defaults in `vmigrate.defaults` with mode `600`. These defaults are only used when a new run config is initialized; an existing run config always wins.
+`vmigrate` has conservative built-in dd defaults. By default, throttling is disabled, but dd still runs with low CPU and I/O priority.
 
-Show or change the persisted defaults:
-
-```bash
-./vmigrate defaults show
-./vmigrate defaults set DD_THROTTLE 1
-./vmigrate defaults set DD_THROTTLE_M 2000
-./vmigrate defaults unset DD_THROTTLE
-```
-
-Use one-time environment overrides for a single new run:
-
-```bash
-VMIGRATE_DD_THROTTLE=1 VMIGRATE_DD_THROTTLE_M=2000 ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
-```
-
-Production-safe opt-in throttling usually starts with:
+Built-in defaults:
 
 ```text
-DD_THROTTLE=1
+DD_BS=4M
+DD_LOW_PRIORITY=1
+DD_NICE=19
+DD_IONICE_CLASS=2
+DD_IONICE_PRIO=7
+DD_THROTTLE=0
 DD_THROTTLE_REQUIRED=0
 DD_THROTTLE_S=512
 DD_THROTTLE_W=2
 DD_THROTTLE_M=2000
 ```
 
-The built-in default remains `DD_THROTTLE=0`, so throttling is disabled unless you opt in with a persisted default or a `VMIGRATE_DD_*` override.
+Persistent defaults are stored locally in:
+
+```text
+vmigrate.defaults
+```
+
+`vmigrate.defaults` is ignored by git and is not included in releases. Set it once per host when you want new `create` or `batch-full` runs to use different dd defaults.
+
+Existing run configs always win. Defaults only affect new run configs.
+
+Priority order for new runs:
+
+```text
+existing run config > VMIGRATE_DD_* environment override > vmigrate.defaults > built-in default
+```
+
+### Show current dd defaults
+
+```bash
+./vmigrate defaults show
+```
+
+### Production-safe throttled mode
+
+Use this on busy nodes where keeping storage responsive is more important than maximum migration speed:
+
+```bash
+./vmigrate defaults set DD_THROTTLE 1
+./vmigrate defaults set DD_THROTTLE_REQUIRED 0
+./vmigrate defaults set DD_THROTTLE_M 2000
+./vmigrate defaults set DD_BS 4M
+
+./vmigrate defaults show
+```
+
+Then run `create` normally:
+
+```bash
+./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+```
+
+The new run config should include:
+
+```text
+DD_BS=4M
+DD_THROTTLE=1
+DD_THROTTLE_REQUIRED=0
+DD_THROTTLE_M=2000
+```
+
+During FULL, the source side should show processes similar to:
+
+```text
+throttle -s 512 -w 2 -m 2000
+dd if=SOURCE_DISK bs=4M iflag=fullblock status=progress
+```
+
+### No throttle / no bandwidth limit
+
+Use this when you want low-priority dd but no throttle limit:
+
+```bash
+./vmigrate defaults set DD_THROTTLE 0
+./vmigrate defaults set DD_BS 4M
+
+./vmigrate defaults show
+```
+
+Then run:
+
+```bash
+./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+```
+
+### Restore built-in default behavior
+
+Remove all local persistent dd defaults:
+
+```bash
+rm -f vmigrate.defaults
+./vmigrate defaults show
+```
+
+Or unset selected keys only:
+
+```bash
+./vmigrate defaults unset DD_THROTTLE
+./vmigrate defaults unset DD_THROTTLE_M
+./vmigrate defaults unset DD_BS
+
+./vmigrate defaults show
+```
+
+### One-time throttled create
+
+Use this when you do not want to change persistent defaults:
+
+```bash
+VMIGRATE_DD_THROTTLE=1 \
+VMIGRATE_DD_THROTTLE_REQUIRED=0 \
+VMIGRATE_DD_THROTTLE_M=2000 \
+VMIGRATE_DD_BS=4M \
+./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+```
+
+### One-time create without throttle
+
+Use this when persistent defaults enable throttle, but this specific run should not be throttled:
+
+```bash
+VMIGRATE_DD_THROTTLE=0 \
+./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+```
+
+### Batch with throttle
+
+Use one-time environment overrides for a throttled batch run:
+
+```bash
+VMIGRATE_DD_THROTTLE=1 \
+VMIGRATE_DD_THROTTLE_REQUIRED=0 \
+VMIGRATE_DD_THROTTLE_M=2000 \
+VMIGRATE_DD_BS=4M \
+./vmigrate batch-full batch.txt
+```
+
+Or set persistent defaults once and then run batch normally:
+
+```bash
+./vmigrate defaults set DD_THROTTLE 1
+./vmigrate defaults set DD_THROTTLE_REQUIRED 0
+./vmigrate defaults set DD_THROTTLE_M 2000
+./vmigrate defaults set DD_BS 4M
+
+./vmigrate batch-full batch.txt
+```
+
+### Verify active run dd settings
+
+After `create` prepares a run, check what the active run will use:
+
+```bash
+./vmigrate show | grep -E 'DD block size|DD priority|DD throttle'
+
+cfg="$(./vmigrate active | awk '/Config/ {print $NF}')"
+grep -nE '^DD_' "$cfg"
+```
+
+Expected throttled mode:
+
+```text
+DD_BS=4M
+DD_THROTTLE=1
+DD_THROTTLE_REQUIRED=0
+DD_THROTTLE_M=2000
+```
+
+### Watch throttle during FULL
+
+Run this on the source host while FULL is running:
+
+```bash
+watch -n 1 '
+echo "--- throttle ---"
+pgrep -af "^throttle " || true
+echo "--- dd/ssh ---"
+ps -eo pid,ppid,ni,pri,stat,etime,cmd | grep -E "dd if=|throttle|ssh -p " | grep -v grep
+'
+```
 
 ---
 
@@ -470,10 +669,10 @@ Batch mode runs FULL syncs sequentially. It continues after an item failure and 
 Create a batch file:
 
 ```bash
-cat > batch.txt <<'EOF'
+cat > batch.txt <<'EOF_BATCH'
 v1001 2001 TARGET_HOST 22 root
 v1002 2002 TARGET_HOST 22 root
-EOF
+EOF_BATCH
 ```
 
 Each non-comment line has this format:
@@ -485,6 +684,16 @@ VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
 Run batch FULL:
 
 ```bash
+./vmigrate batch-full batch.txt
+```
+
+Run batch FULL with one-time throttle settings:
+
+```bash
+VMIGRATE_DD_THROTTLE=1 \
+VMIGRATE_DD_THROTTLE_REQUIRED=0 \
+VMIGRATE_DD_THROTTLE_M=2000 \
+VMIGRATE_DD_BS=4M \
 ./vmigrate batch-full batch.txt
 ```
 
@@ -771,6 +980,7 @@ migrations/       Per-run logs, config, reports, and summaries
 locks/            Runtime lock files
 .vmigrate-active  Active run pointer
 vmigrate.env      Legacy/default fallback config
+vmigrate.defaults Local persistent dd defaults, ignored by git
 ```
 
 Runtime files are ignored by Git.
@@ -830,6 +1040,14 @@ If still failing:
 ```bash
 ./vmigrate tunnel-check
 ```
+
+Upgrade check says dirty:
+
+```bash
+git status --short
+```
+
+Do not commit runtime files. Remove accidental test files or add safe local runtime files to `.gitignore` when appropriate.
 
 ---
 
