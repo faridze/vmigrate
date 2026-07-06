@@ -2,7 +2,7 @@
 # vmigrate destination-side helper
 set -Eeuo pipefail
 
-VERSION="1.0.1"
+VERSION="1.6.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${VMIGRATE_CONFIG:-${SCRIPT_DIR}/vmigrate.env}"
 
@@ -221,39 +221,18 @@ Disk           : $TARGET_DISK
 NBD port       : $NBD_PORT
 NBD export     : $NBD_EXPORT
 
-Handoff token
--------------
+Current recommended source-side path
+------------------------------------
+Use the guided source-side workflow. It will copy vmigrate-agent, prepare the remote workspace, discover the target disk, select NBD port, and ask before FULL/CUTOVER:
+
+./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+
+Legacy handoff token
+--------------------
+The token below is kept for advanced/manual workflows only.
+Do not run the old source-side quick command; that command is not available in current vmigrate.
+
 $token
-
-Recommended quick path
-----------------------
-1) On source, use the handoff token and let quick discover the source VM:
-./vmigrate quick '$token'
-
-2) On destination, start the NBD export:
-./vmigrate-agent doctor
-./vmigrate-agent export
-
-3) On source, continue with the commands printed by quick/next:
-./vmigrate tunnel
-./vmigrate tunnel-check
-./vmigrate attach-target
-./vmigrate check-target
-./vmigrate bitmap
-./vmigrate check-bitmap
-./vmigrate full
-./vmigrate wait-full
-./vmigrate report
-
-4) For cutover, run on source:
-./vmigrate cutover-check
-./vmigrate final
-./vmigrate report
-./vmigrate stop-source
-
-5) After source final/stop-source succeeds, run on destination:
-./vmigrate-agent close
-./vmigrate-agent boot
 EOF
 }
 

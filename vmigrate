@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="1.6.0"
+VERSION="1.6.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 DEFAULTS_FILE="${SCRIPT_DIR}/vmigrate.defaults"
@@ -226,7 +226,7 @@ What create does:
   7. Opens destination NBD export.
   8. Starts/reuses SSH tunnel.
   9. Creates bitmap.
- 10. Starts FULL sync and waits.
+ 10. Offers to start FULL sync and waits only after typing FULL.
  11. Offers optional incremental sync.
  12. Runs final cutover only after confirmation.
  13. Asks before stopping source.
@@ -241,7 +241,10 @@ Confirm words you may be asked to type:
 
 Important:
   STOP is only after final completed.
-  CLEAN closes export/tunnel only. It does not delete disks or VMs.
+  CLEAN is only allowed after final completion.
+  CLEAN stops the local tunnel and removes the source dirty bitmap if present.
+  CLEAN does not delete disks or VMs.
+  Close the remote export separately with remote-dst-close or vmigrate-agent close.
 EOF
       ;;
 
@@ -3218,10 +3221,12 @@ full_sync(){
   case "$(full_method)" in
     dd)
       if src_disk_is_raw_block; then
-        dd_full_copy
         state_write FULL_STARTED 1
         state_write FULL_STARTED_AT "$(now_ts)"
         state_write FULL_JOB_ID dd
+        state_write FULL_COMPLETED 0
+        state_write FULL_COMPLETED_AT ""
+        dd_full_copy
         state_write FULL_COMPLETED 1
         state_write FULL_COMPLETED_AT "$(now_ts)"
         ok "Full sync completed by dd"
@@ -3811,11 +3816,45 @@ EOF
 
 cleanup(){
   load_config
-  pkill -f "${NBD_PORT}:127.0.0.1:${NBD_PORT}.*${TARGET_HOST}" >/dev/null 2>&1 || true
+  state_sync_identity
+
+  echo "cleanup"
+  echo "-------"
+  echo "VM        : $VM_NAME"
+  echo "Run config: $CONFIG_FILE"
+  echo "State file: $(state_file)"
+  echo
+
+  if ! state_is_final_completed; then
+    warn "FINAL_COMPLETED=1 is not set."
+    warn "FULL may already be done, but final cutover is not recorded as completed."
+    warn "Refusing normal cleanup because removing the dirty bitmap before FINAL can make final incremental unsafe."
+    cat <<EOF
+Safe alternatives:
+  ./vmigrate status
+  ./vmigrate report
+  ./vmigrate tunnel-stop
+  ./vmigrate remote-dst-close
+  ./vmigrate cleanup-stale
+
+Run ./vmigrate finalize after FULL is completed and reviewed.
+EOF
+    return 1
+  fi
+
+  warn "FINAL is completed. Cleanup will stop the local tunnel and remove the source dirty bitmap if present."
+  ask_exact "Continue cleanup after FINAL? Type CLEAN:" "CLEAN" || die "Aborted"
+
+  tunnel_stop || warn "Tunnel stop failed or no matching tunnel was found."
+
   if bitmap_exists; then
     qmp '{"execute":"block-dirty-bitmap-remove","arguments":{"node":"'"$QEMU_NODE"'","name":"'"$BITMAP"'"}}' || true
+    ok "Bitmap cleanup attempted: $BITMAP"
+  else
+    warn "Bitmap not found or already removed: $BITMAP"
   fi
-  ok "Source cleanup attempted"
+
+  ok "Source cleanup completed"
 }
 
 stop_source_run(){
@@ -4849,8 +4888,8 @@ EOF
   write_key FULL_METHOD "${VMIGRATE_FULL_METHOD:-auto}"
   load_config
 
-  # Batch mode is non-interactive. If a previous export/tunnel was left open
-  # for the same run/config, clean it safely and retry instead of failing.
+  # If a previous export/tunnel was left open for this run/config,
+  # clean it safely and retry instead of failing.
   tunnel_stop || true
   remote_dst_close || true
 
