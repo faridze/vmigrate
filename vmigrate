@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="1.5.0"
+VERSION="1.6.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 DEFAULTS_FILE="${SCRIPT_DIR}/vmigrate.defaults"
