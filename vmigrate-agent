@@ -2,7 +2,7 @@
 # vmigrate destination-side helper
 set -Eeuo pipefail
 
-VERSION="1.6.1"
+VERSION="1.6.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${VMIGRATE_CONFIG:-${SCRIPT_DIR}/vmigrate.env}"
 
@@ -33,8 +33,12 @@ Usage:
   ./vmigrate-agent boot
   ./vmigrate-agent status
 
-Recommended first run:
-  ./vmigrate-agent quick 2672
+Recommended normal workflow:
+  Run from source:
+    ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
+
+Destination-side helper:
+  ./vmigrate-agent quick TARGET_ID
 EOF
 }
 
@@ -295,15 +299,62 @@ export_disk(){
 
 close_export(){
   load_config
-  pkill -f "qemu-nbd.*${NBD_PORT}.*${NBD_EXPORT}" >/dev/null 2>&1 || true
-  pkill -f "qemu-nbd.*${TARGET_DISK}" >/dev/null 2>&1 || true
+  need ss
+
+  local lines pids pid cmd matched remaining
+  lines="$(ss -lntp 2>/dev/null | awk -v addr="127.0.0.1:${NBD_PORT}" '$4 == addr {print}')"
+
+  if [[ -z "$lines" ]]; then
+    ok "NBD export already closed"
+    return 0
+  fi
+
+  pids="$(printf '%s\n' "$lines" | sed -n -E 's/.*pid=([0-9][0-9]*).*/\1/p' | sort -u)"
+
+  if [[ -z "$pids" ]]; then
+    warn "NBD port appears open but PID could not be parsed: 127.0.0.1:${NBD_PORT}"
+    printf '%s\n' "$lines"
+    return 1
+  fi
+
+  matched=0
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+
+    cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    if [[ "$cmd" != *qemu-nbd* ]]; then
+      warn "PID $pid on NBD port is not qemu-nbd; skipping: ${cmd:-unknown}"
+      continue
+    fi
+
+    if [[ "$cmd" == *"$NBD_EXPORT"* || "$cmd" == *"$TARGET_DISK"* ]]; then
+      info "Stopping qemu-nbd pid=$pid for 127.0.0.1:${NBD_PORT}"
+      kill "$pid" 2>/dev/null || true
+      matched=1
+    else
+      warn "qemu-nbd pid=$pid does not match export/disk; skipping: $cmd"
+    fi
+  done <<< "$pids"
+
+  if [[ "$matched" != "1" ]]; then
+    warn "No matching qemu-nbd process was stopped for 127.0.0.1:${NBD_PORT}"
+    return 1
+  fi
+
   sleep 1
-  ss -lntp | grep "$NBD_PORT" && warn "Port still appears open" || ok "NBD export closed"
+  remaining="$(ss -lntp 2>/dev/null | awk -v addr="127.0.0.1:${NBD_PORT}" '$4 == addr {print}')"
+  if [[ -n "$remaining" ]]; then
+    warn "Port still appears open: 127.0.0.1:${NBD_PORT}"
+    printf '%s\n' "$remaining"
+    return 1
+  fi
+
+  ok "NBD export closed"
 }
 
 boot_vm(){
   load_config
-  close_export || true
+  close_export || die "Refusing to boot target while NBD export may still be open"
   qm start "$TARGET_ID"
   ok "Boot command sent for Target ID $TARGET_ID"
 }

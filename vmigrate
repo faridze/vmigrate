@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="1.6.1"
+VERSION="1.6.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 DEFAULTS_FILE="${SCRIPT_DIR}/vmigrate.defaults"
@@ -241,10 +241,10 @@ Confirm words you may be asked to type:
 
 Important:
   STOP is only after final completed.
-  CLEAN is only allowed after final completion.
-  CLEAN stops the local tunnel and removes the source dirty bitmap if present.
-  CLEAN does not delete disks or VMs.
-  Close the remote export separately with remote-dst-close or vmigrate-agent close.
+  CLEAN inside create/finalize closes the destination NBD export and local tunnel.
+  It does not delete disks or VMs.
+  It does not remove the source dirty bitmap.
+  After final completion, use ./vmigrate cleanup if you intentionally want to remove the source dirty bitmap.
 EOF
       ;;
 
@@ -565,7 +565,10 @@ Recover stale tunnel/export:
   ./vmigrate tunnel-check
 
 Safety:
-  cleanup does not delete disks, LVs, VM definitions, or migrated data.
+  ./vmigrate cleanup is only allowed after FINAL_COMPLETED=1.
+  It stops the local tunnel and removes the source dirty bitmap if present.
+  It does not close the remote export; use remote-dst-close separately.
+  It does not delete disks, LVs, VM definitions, or migrated data.
 EOF
       ;;
 
@@ -1743,7 +1746,11 @@ resume_check(){
     next="./vmigrate bitmap"
   elif [[ "$full" != "completed" ]]; then
     if [[ "$(state_get FULL_STARTED)" == "1" ]]; then
-      next="./vmigrate wait-full"
+      if [[ "$(state_get FULL_JOB_ID)" == "dd" ]]; then
+        next="DD full copy was started but not completed. Review logs/report, then rerun ./vmigrate full to restart dd full copy, or use ./vmigrate mark-full only if you verified dd completed successfully."
+      else
+        next="./vmigrate wait-full"
+      fi
     else
       next="./vmigrate full"
     fi
@@ -1799,6 +1806,9 @@ EOF
         ;;
       "./vmigrate set-nbd-port PORT")
         die "Cannot auto-run set-nbd-port without a concrete PORT. Run set-nbd-port auto or set-nbd-port PORT manually."
+        ;;
+      DD\ full\ copy\ was\ started\ but\ not\ completed.*)
+        die "Refusing to auto-run incomplete dd FULL. Review logs/report, then rerun ./vmigrate full to restart dd full copy, or use ./vmigrate mark-full only if you verified dd completed successfully."
         ;;
       "./vmigrate stop-source"| "./vmigrate final")
         die "Refusing to auto-run high-risk step: $next. Run it manually after review."
