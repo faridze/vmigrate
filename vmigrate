@@ -673,7 +673,7 @@ write_key(){
 
 dd_config_key_allowed(){
   case "$1" in
-    DD_BS|DD_LOW_PRIORITY|DD_NICE|DD_IONICE_CLASS|DD_IONICE_PRIO|DD_THROTTLE|DD_THROTTLE_REQUIRED|DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M|DD_IO_MONITOR|DD_IO_MONITOR_INTERVAL|DD_IO_MONITOR_TIMEOUT|DD_IO_WARN_WRITEBACK_GIB|DD_IO_WARN_B|DD_IO_WARN_WA|DD_IO_WARN_DSTATE_COUNT) return 0 ;;
+    DD_BS|DD_LOW_PRIORITY|DD_NICE|DD_IONICE_CLASS|DD_IONICE_PRIO|DD_THROTTLE|DD_THROTTLE_REQUIRED|DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M|DD_IO_MONITOR|DD_IO_MONITOR_INTERVAL|DD_IO_MONITOR_TIMEOUT|DD_IO_WARN_WRITEBACK_GIB|DD_IO_WARN_B|DD_IO_WARN_WA|DD_IO_WARN_DSTATE_COUNT|DD_IO_AUTOPAUSE|DD_IO_PAUSE_CONSECUTIVE|DD_IO_PAUSE_WRITEBACK_GIB|DD_IO_PAUSE_B|DD_IO_PAUSE_WA|DD_IO_PAUSE_DSTATE_STORAGE|DD_IO_RESUME_WRITEBACK_GIB|DD_IO_RESUME_B|DD_IO_RESUME_WA|DD_IO_RESUME_CONSECUTIVE|DD_IO_PAUSE_MAX_SEC|DD_IO_PAUSE_COOLDOWN_SEC) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -682,13 +682,13 @@ dd_config_value_valid(){
   local key="$1" val="$2"
   case "$key" in
     DD_BS) [[ "$val" =~ ^[1-9][0-9]*[KMG]?$ ]] ;;
-    DD_LOW_PRIORITY|DD_THROTTLE|DD_THROTTLE_REQUIRED) [[ "$val" =~ ^[01]$ ]] ;;
+    DD_LOW_PRIORITY|DD_THROTTLE|DD_THROTTLE_REQUIRED|DD_IO_AUTOPAUSE|DD_IO_PAUSE_DSTATE_STORAGE) [[ "$val" =~ ^[01]$ ]] ;;
     DD_NICE) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 19 )) ;;
     DD_IONICE_CLASS) [[ "$val" =~ ^[23]$ ]] ;;
     DD_IONICE_PRIO) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 7 )) ;;
-    DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M|DD_IO_MONITOR_INTERVAL|DD_IO_MONITOR_TIMEOUT|DD_IO_WARN_WRITEBACK_GIB|DD_IO_WARN_B|DD_IO_WARN_DSTATE_COUNT) [[ "$val" =~ ^[1-9][0-9]*$ ]] ;;
+    DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M|DD_IO_MONITOR_INTERVAL|DD_IO_MONITOR_TIMEOUT|DD_IO_WARN_WRITEBACK_GIB|DD_IO_WARN_B|DD_IO_WARN_DSTATE_COUNT|DD_IO_PAUSE_CONSECUTIVE|DD_IO_PAUSE_WRITEBACK_GIB|DD_IO_PAUSE_B|DD_IO_RESUME_WRITEBACK_GIB|DD_IO_RESUME_B|DD_IO_RESUME_CONSECUTIVE|DD_IO_PAUSE_MAX_SEC|DD_IO_PAUSE_COOLDOWN_SEC) [[ "$val" =~ ^[1-9][0-9]*$ ]] ;;
     DD_IO_MONITOR) [[ "$val" =~ ^[01]$ ]] ;;
-    DD_IO_WARN_WA) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 100 )) ;;
+    DD_IO_WARN_WA|DD_IO_PAUSE_WA|DD_IO_RESUME_WA) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 100 )) ;;
     *) return 1 ;;
   esac
 }
@@ -712,6 +712,18 @@ dd_config_default(){
     DD_IO_WARN_B) printf '%s\n' "30" ;;
     DD_IO_WARN_WA) printf '%s\n' "40" ;;
     DD_IO_WARN_DSTATE_COUNT) printf '%s\n' "5" ;;
+    DD_IO_AUTOPAUSE) printf '%s\n' "0" ;;
+    DD_IO_PAUSE_CONSECUTIVE) printf '%s\n' "2" ;;
+    DD_IO_PAUSE_WRITEBACK_GIB) printf '%s\n' "8" ;;
+    DD_IO_PAUSE_B) printf '%s\n' "50" ;;
+    DD_IO_PAUSE_WA) printf '%s\n' "60" ;;
+    DD_IO_PAUSE_DSTATE_STORAGE) printf '%s\n' "1" ;;
+    DD_IO_RESUME_WRITEBACK_GIB) printf '%s\n' "1" ;;
+    DD_IO_RESUME_B) printf '%s\n' "5" ;;
+    DD_IO_RESUME_WA) printf '%s\n' "10" ;;
+    DD_IO_RESUME_CONSECUTIVE) printf '%s\n' "2" ;;
+    DD_IO_PAUSE_MAX_SEC) printf '%s\n' "900" ;;
+    DD_IO_PAUSE_COOLDOWN_SEC) printf '%s\n' "60" ;;
     *) return 1 ;;
   esac
 }
@@ -734,7 +746,19 @@ dd_config_keys(){
     DD_IO_WARN_WRITEBACK_GIB \
     DD_IO_WARN_B \
     DD_IO_WARN_WA \
-    DD_IO_WARN_DSTATE_COUNT
+    DD_IO_WARN_DSTATE_COUNT \
+    DD_IO_AUTOPAUSE \
+    DD_IO_PAUSE_CONSECUTIVE \
+    DD_IO_PAUSE_WRITEBACK_GIB \
+    DD_IO_PAUSE_B \
+    DD_IO_PAUSE_WA \
+    DD_IO_PAUSE_DSTATE_STORAGE \
+    DD_IO_RESUME_WRITEBACK_GIB \
+    DD_IO_RESUME_B \
+    DD_IO_RESUME_WA \
+    DD_IO_RESUME_CONSECUTIVE \
+    DD_IO_PAUSE_MAX_SEC \
+    DD_IO_PAUSE_COOLDOWN_SEC
 }
 
 defaults_get_raw(){
@@ -975,7 +999,21 @@ state_sync_identity(){
   [[ -n "$(state_get DD_COPY_BYTES_COMPLETED)" ]] || state_write DD_COPY_BYTES_COMPLETED ""
   [[ -n "$(state_get DD_FINAL_FLUSH_STARTED)" ]] || state_write DD_FINAL_FLUSH_STARTED ""
   [[ -n "$(state_get DD_EXITED)" ]] || state_write DD_EXITED ""
+  [[ -n "$(state_get DD_SOURCE_EXIT_CODE)" ]] || state_write DD_SOURCE_EXIT_CODE ""
+  [[ -n "$(state_get DD_DOWNSTREAM_EXIT_CODE)" ]] || state_write DD_DOWNSTREAM_EXIT_CODE ""
+  [[ -n "$(state_get DD_SOURCE_TERMINATED_DUE_DOWNSTREAM)" ]] || state_write DD_SOURCE_TERMINATED_DUE_DOWNSTREAM ""
   [[ -n "$(state_get DD_EXIT_CODE)" ]] || state_write DD_EXIT_CODE ""
+  [[ -n "$(state_get DD_SOURCE_PID)" ]] || state_write DD_SOURCE_PID ""
+  [[ -n "$(state_get DD_AUTO_PAUSED)" ]] || state_write DD_AUTO_PAUSED 0
+  [[ -n "$(state_get DD_AUTO_PAUSE_STARTED_AT)" ]] || state_write DD_AUTO_PAUSE_STARTED_AT ""
+  [[ -n "$(state_get DD_AUTO_PAUSE_REASON)" ]] || state_write DD_AUTO_PAUSE_REASON ""
+  [[ -n "$(state_get DD_AUTO_PAUSE_COUNT)" ]] || state_write DD_AUTO_PAUSE_COUNT 0
+  [[ -n "$(state_get DD_AUTO_RESUME_COUNT)" ]] || state_write DD_AUTO_RESUME_COUNT 0
+  [[ -n "$(state_get DD_LAST_IO_STATUS)" ]] || state_write DD_LAST_IO_STATUS ""
+  [[ -n "$(state_get DD_LAST_IO_WRITEBACK_GIB)" ]] || state_write DD_LAST_IO_WRITEBACK_GIB ""
+  [[ -n "$(state_get DD_LAST_IO_B)" ]] || state_write DD_LAST_IO_B ""
+  [[ -n "$(state_get DD_LAST_IO_WA)" ]] || state_write DD_LAST_IO_WA ""
+  [[ -n "$(state_get DD_LAST_IO_DSTATE_STORAGE)" ]] || state_write DD_LAST_IO_DSTATE_STORAGE ""
 }
 activate_run_dir(){
   local dir="$1"
@@ -3112,6 +3150,66 @@ validate_dd_priority_config(){
     warn "Invalid DD_IO_WARN_DSTATE_COUNT=${DD_IO_WARN_DSTATE_COUNT:-}; using 5"
     DD_IO_WARN_DSTATE_COUNT=5
   fi
+
+  case "${DD_IO_AUTOPAUSE:-0}" in
+    0|1) ;;
+    *) warn "Invalid DD_IO_AUTOPAUSE=${DD_IO_AUTOPAUSE:-}; using 0"; DD_IO_AUTOPAUSE=0 ;;
+  esac
+
+  case "${DD_IO_PAUSE_DSTATE_STORAGE:-1}" in
+    0|1) ;;
+    *) warn "Invalid DD_IO_PAUSE_DSTATE_STORAGE=${DD_IO_PAUSE_DSTATE_STORAGE:-}; using 1"; DD_IO_PAUSE_DSTATE_STORAGE=1 ;;
+  esac
+
+  if ! [[ "${DD_IO_PAUSE_CONSECUTIVE:-2}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_PAUSE_CONSECUTIVE=${DD_IO_PAUSE_CONSECUTIVE:-}; using 2"
+    DD_IO_PAUSE_CONSECUTIVE=2
+  fi
+
+  if ! [[ "${DD_IO_RESUME_CONSECUTIVE:-2}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_RESUME_CONSECUTIVE=${DD_IO_RESUME_CONSECUTIVE:-}; using 2"
+    DD_IO_RESUME_CONSECUTIVE=2
+  fi
+
+  if ! [[ "${DD_IO_PAUSE_WRITEBACK_GIB:-8}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_PAUSE_WRITEBACK_GIB=${DD_IO_PAUSE_WRITEBACK_GIB:-}; using 8"
+    DD_IO_PAUSE_WRITEBACK_GIB=8
+  fi
+
+  if ! [[ "${DD_IO_PAUSE_B:-50}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_PAUSE_B=${DD_IO_PAUSE_B:-}; using 50"
+    DD_IO_PAUSE_B=50
+  fi
+
+  if ! [[ "${DD_IO_PAUSE_WA:-60}" =~ ^[0-9]+$ ]] || (( DD_IO_PAUSE_WA > 100 )); then
+    warn "Invalid DD_IO_PAUSE_WA=${DD_IO_PAUSE_WA:-}; using 60"
+    DD_IO_PAUSE_WA=60
+  fi
+
+  if ! [[ "${DD_IO_RESUME_WRITEBACK_GIB:-1}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_RESUME_WRITEBACK_GIB=${DD_IO_RESUME_WRITEBACK_GIB:-}; using 1"
+    DD_IO_RESUME_WRITEBACK_GIB=1
+  fi
+
+  if ! [[ "${DD_IO_RESUME_B:-5}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_RESUME_B=${DD_IO_RESUME_B:-}; using 5"
+    DD_IO_RESUME_B=5
+  fi
+
+  if ! [[ "${DD_IO_RESUME_WA:-10}" =~ ^[0-9]+$ ]] || (( DD_IO_RESUME_WA > 100 )); then
+    warn "Invalid DD_IO_RESUME_WA=${DD_IO_RESUME_WA:-}; using 10"
+    DD_IO_RESUME_WA=10
+  fi
+
+  if ! [[ "${DD_IO_PAUSE_MAX_SEC:-900}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_PAUSE_MAX_SEC=${DD_IO_PAUSE_MAX_SEC:-}; using 900"
+    DD_IO_PAUSE_MAX_SEC=900
+  fi
+
+  if ! [[ "${DD_IO_PAUSE_COOLDOWN_SEC:-60}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_PAUSE_COOLDOWN_SEC=${DD_IO_PAUSE_COOLDOWN_SEC:-}; using 60"
+    DD_IO_PAUSE_COOLDOWN_SEC=60
+  fi
 }
 
 dd_priority_info(){
@@ -3195,6 +3293,17 @@ dd_priority_run_local(){
   exec "$@"
 }
 
+dd_priority_exec_local(){
+  if [[ "${DD_LOW_PRIORITY:-1}" == "1" ]]; then
+    dd_priority_apply_current local
+    if ! command -v renice >/dev/null 2>&1 && command -v nice >/dev/null 2>&1; then
+      exec nice -n "$DD_NICE" "$@"
+    fi
+  fi
+
+  exec "$@"
+}
+
 dd_priority_prefix_remote(){
   local q_target q_bs q_low q_nice q_class q_prio
   q_target="$(shell_quote "$TARGET_DISK")"
@@ -3254,8 +3363,20 @@ dd_io_monitor_ssh(){
   remote_ssh "$remote_cmd"
 }
 
+dd_io_storage_dstate_detected(){
+  awk '$1=="DSTATE" && ($4 ~ /(dm-thin|rq_qos_wait|hpsa|nbd|blk|io_schedule|scsi|virtio_blk|virtio_scsi)/ || $5 ~ /(dm-thin|hpsa|nbd|blk|scsi|virtio_blk|virtio_scsi)/) {found=1} END {exit found ? 0 : 1}'
+}
+
 dd_io_monitor_sample(){
   local log="$1" sample writeback_kib writeback_gib vm_b vm_wa dstate_count threshold_kib ts timeout_s rc remote_cmd
+  local critical=0 healthy=1 reason=""
+  DD_IO_SAMPLE_STATUS="healthy"
+  DD_IO_SAMPLE_REASON="healthy"
+  DD_IO_SAMPLE_WRITEBACK_GIB=""
+  DD_IO_SAMPLE_B=""
+  DD_IO_SAMPLE_WA=""
+  DD_IO_SAMPLE_DSTATE_STORAGE=0
+
   ts="$(now_ts)"
   timeout_s="${DD_IO_MONITOR_TIMEOUT:-10}"
   remote_cmd="$(cat <<'REMOTE'
@@ -3293,41 +3414,187 @@ REMOTE
   writeback_kib="$(printf '%s\n' "$sample" | awk '$1=="MEM" && $2=="Writeback" {print $3; exit}')"
   if [[ "$writeback_kib" =~ ^[0-9]+$ ]]; then
     threshold_kib=$(( DD_IO_WARN_WRITEBACK_GIB * 1024 * 1024 ))
+    writeback_gib="$(awk -v kb="$writeback_kib" 'BEGIN {printf "%.1f", kb/1024/1024}')"
+    DD_IO_SAMPLE_WRITEBACK_GIB="$writeback_gib"
+    state_write DD_LAST_IO_WRITEBACK_GIB "$writeback_gib" 2>/dev/null || true
     if (( writeback_kib > threshold_kib )); then
-      writeback_gib="$(awk -v kb="$writeback_kib" 'BEGIN {printf "%.1f", kb/1024/1024}')"
       warn "destination writeback is high: ${writeback_gib} GiB. Storage is still flushing; do not interrupt unless necessary."
+    fi
+    if (( writeback_kib >= DD_IO_PAUSE_WRITEBACK_GIB * 1024 * 1024 )); then
+      critical=1; reason="writeback=${writeback_gib}GiB"
+    fi
+    if (( writeback_kib > DD_IO_RESUME_WRITEBACK_GIB * 1024 * 1024 )); then
+      healthy=0
     fi
   fi
 
   vm_b="$(printf '%s\n' "$sample" | awk '$1=="VMSTAT" {print $2; exit}')"
   vm_wa="$(printf '%s\n' "$sample" | awk '$1=="VMSTAT" {print $3; exit}')"
+  if [[ "$vm_b" =~ ^[0-9]+$ ]]; then
+    DD_IO_SAMPLE_B="$vm_b"
+    state_write DD_LAST_IO_B "$vm_b" 2>/dev/null || true
+  fi
+  if [[ "$vm_wa" =~ ^[0-9]+$ ]]; then
+    DD_IO_SAMPLE_WA="$vm_wa"
+    state_write DD_LAST_IO_WA "$vm_wa" 2>/dev/null || true
+  fi
   if [[ "$vm_b" =~ ^[0-9]+$ && "$vm_wa" =~ ^[0-9]+$ ]] && (( vm_b >= DD_IO_WARN_B || vm_wa >= DD_IO_WARN_WA )); then
     warn "destination I/O pressure high: b=${vm_b} wa=${vm_wa}%. This may cause D-state on LVM-thin/storage."
+  fi
+  if [[ "$vm_b" =~ ^[0-9]+$ ]]; then
+    (( vm_b >= DD_IO_PAUSE_B )) && critical=1 && reason="b=${vm_b}"
+    (( vm_b > DD_IO_RESUME_B )) && healthy=0
+  fi
+  if [[ "$vm_wa" =~ ^[0-9]+$ ]]; then
+    (( vm_wa >= DD_IO_PAUSE_WA )) && critical=1 && reason="wa=${vm_wa}%"
+    (( vm_wa > DD_IO_RESUME_WA )) && healthy=0
   fi
 
   dstate_count="$(printf '%s\n' "$sample" | awk '$1=="DSTATE_COUNT" {print $2; exit}')"
   if [[ "$dstate_count" =~ ^[0-9]+$ ]] && (( dstate_count >= DD_IO_WARN_DSTATE_COUNT )); then
     warn "destination has D-state tasks: count=${dstate_count}. If this persists, pause/throttle future runs."
-  elif printf '%s\n' "$sample" | awk '$1=="DSTATE" && ($4 ~ /(dm-thin|rq_qos_wait|hpsa|nbd|blk|io_schedule)/ || $5 ~ /(dm-thin|hpsa|nbd|blk)/) {found=1} END {exit found ? 0 : 1}'; then
-    warn "destination has D-state tasks in storage paths. If this persists, pause/throttle future runs."
   fi
+  if printf '%s\n' "$sample" | dd_io_storage_dstate_detected; then
+    DD_IO_SAMPLE_DSTATE_STORAGE=1
+    state_write DD_LAST_IO_DSTATE_STORAGE 1 2>/dev/null || true
+    warn "destination has D-state tasks in storage paths. If this persists, pause/throttle future runs."
+    if [[ "${DD_IO_PAUSE_DSTATE_STORAGE:-1}" == "1" ]]; then
+      critical=1; healthy=0; reason="storage D-state"
+    fi
+  else
+    state_write DD_LAST_IO_DSTATE_STORAGE 0 2>/dev/null || true
+  fi
+
+  if (( critical )); then
+    DD_IO_SAMPLE_STATUS="critical"
+    DD_IO_SAMPLE_REASON="$reason"
+  elif (( healthy )); then
+    DD_IO_SAMPLE_STATUS="healthy"
+    DD_IO_SAMPLE_REASON="healthy"
+  else
+    DD_IO_SAMPLE_STATUS="watch"
+    DD_IO_SAMPLE_REASON="recovering"
+  fi
+
+  state_write DD_LAST_IO_STATUS "$DD_IO_SAMPLE_STATUS" 2>/dev/null || true
+}
+
+dd_source_pid_matches_current_run(){
+  local pid="$1" cmd
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  [[ "$cmd" == *dd* ]] || return 1
+  [[ "$cmd" == *"if=$SRC_DISK"* || "$cmd" == *"$SRC_DISK"* ]] || return 1
+}
+
+dd_source_pid_verified(){
+  [[ "${DD_IO_AUTOPAUSE:-0}" == "1" ]] || return 1
+  dd_source_pid_matches_current_run "$1"
+}
+
+dd_auto_pause_disable(){
+  local reason="$1" log="$2"
+  DD_IO_AUTOPAUSE=0
+  warn "Auto-pause disabled for this run: $reason"
+  printf '%s\n' "$(now_ts) Auto-pause disabled for this run: $reason" >> "$log" 2>/dev/null || true
+  state_write DD_AUTO_PAUSE_REASON "disabled: $reason" 2>/dev/null || true
+}
+
+dd_auto_resume_if_paused(){
+  local pid="$1" log="$2"
+  [[ "$(state_get DD_AUTO_PAUSED)" == "1" ]] || return 0
+  if dd_source_pid_matches_current_run "$pid"; then
+    kill -CONT "$pid" 2>/dev/null || true
+    warn "Destination I/O monitor cleanup resumed source dd pid=$pid to avoid leaving it stopped."
+    printf '%s\n' "$(now_ts) cleanup SIGCONT source dd pid=$pid" >> "$log" 2>/dev/null || true
+  fi
+  state_write DD_AUTO_PAUSED 0 2>/dev/null || true
+}
+
+dd_auto_pause_source(){
+  local pid="$1" reason="$2" log="$3" count
+  if ! dd_source_pid_verified "$pid"; then
+    dd_auto_pause_disable "source dd PID verification failed" "$log"
+    return 1
+  fi
+  warn "Destination I/O critical; pausing source dd pid=$pid..."
+  kill -STOP "$pid" || { dd_auto_pause_disable "SIGSTOP failed for source dd pid=$pid" "$log"; return 1; }
+  count="$(state_get DD_AUTO_PAUSE_COUNT)"; [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  count=$(( count + 1 ))
+  state_write DD_AUTO_PAUSED 1
+  state_write DD_AUTO_PAUSE_STARTED_AT "$(now_ts)"
+  state_write DD_AUTO_PAUSE_REASON "$reason"
+  state_write DD_AUTO_PAUSE_COUNT "$count"
+  printf '%s\n' "$(now_ts) SIGSTOP source dd pid=$pid reason=$reason" >> "$log" 2>/dev/null || true
+}
+
+dd_auto_resume_source(){
+  local pid="$1" log="$2" count
+  if ! dd_source_pid_verified "$pid"; then
+    dd_auto_pause_disable "source dd PID verification failed before resume" "$log"
+    return 1
+  fi
+  warn "Destination I/O recovered; resuming source dd pid=$pid..."
+  kill -CONT "$pid" || { dd_auto_pause_disable "SIGCONT failed for source dd pid=$pid" "$log"; return 1; }
+  count="$(state_get DD_AUTO_RESUME_COUNT)"; [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  count=$(( count + 1 ))
+  state_write DD_AUTO_PAUSED 0
+  state_write DD_AUTO_PAUSE_STARTED_AT ""
+  state_write DD_AUTO_PAUSE_REASON ""
+  state_write DD_AUTO_RESUME_COUNT "$count"
+  printf '%s\n' "$(now_ts) SIGCONT source dd pid=$pid" >> "$log" 2>/dev/null || true
 }
 
 dd_io_monitor_loop(){
-  local log interval
+  local source_dd_pid="${1:-}" log interval critical_count=0 healthy_count=0 paused=0 pause_started_epoch=0 last_signal_epoch=0 now held
   log="$(config_dir)/dest-io-monitor.log"
   interval="${DD_IO_MONITOR_INTERVAL:-30}"
   printf '%s\n' "# vmigrate destination I/O monitor started $(now_ts)" >> "$log" 2>/dev/null || true
   while :; do
-    dd_io_monitor_sample "$log" || warn "destination I/O monitor sample failed; continuing dd full copy"
+    if dd_io_monitor_sample "$log"; then
+      if [[ "${DD_IO_AUTOPAUSE:-0}" == "1" && -n "$source_dd_pid" ]]; then
+        now="$(date +%s)"
+        case "$DD_IO_SAMPLE_STATUS" in
+          critical)
+            critical_count=$(( critical_count + 1 )); healthy_count=0
+            if (( paused == 0 && critical_count >= DD_IO_PAUSE_CONSECUTIVE && now - last_signal_epoch >= DD_IO_PAUSE_COOLDOWN_SEC )); then
+              if dd_auto_pause_source "$source_dd_pid" "$DD_IO_SAMPLE_REASON" "$log"; then
+                paused=1; pause_started_epoch="$now"; last_signal_epoch="$now"
+              fi
+            elif (( paused == 1 )); then
+              held=$(( now - pause_started_epoch ))
+              if (( held >= DD_IO_PAUSE_MAX_SEC )); then
+                warn "Auto-pause active for ${held} seconds; waiting for destination storage to recover..."
+                printf '%s\n' "$(now_ts) auto-pause active ${held}s reason=$(state_get DD_AUTO_PAUSE_REASON)" >> "$log" 2>/dev/null || true
+              fi
+            fi
+            ;;
+          healthy)
+            healthy_count=$(( healthy_count + 1 )); critical_count=0
+            if (( paused == 1 && healthy_count >= DD_IO_RESUME_CONSECUTIVE && now - last_signal_epoch >= DD_IO_PAUSE_COOLDOWN_SEC )); then
+              if dd_auto_resume_source "$source_dd_pid" "$log"; then
+                paused=0; pause_started_epoch=0; last_signal_epoch="$now"
+              fi
+            fi
+            ;;
+          *)
+            critical_count=0; healthy_count=0
+            ;;
+        esac
+      fi
+    else
+      warn "destination I/O monitor sample failed; continuing dd full copy"
+    fi
     sleep "$interval" || break
   done
 }
 
 dd_io_monitor_start(){
+  local source_dd_pid="${1:-}"
   DD_IO_MONITOR_PID=""
   [[ "${DD_IO_MONITOR:-1}" == "1" ]] || return 0
-  dd_io_monitor_loop &
+  dd_io_monitor_loop "$source_dd_pid" &
   DD_IO_MONITOR_PID=$!
   ok "Destination I/O monitor enabled: $(config_dir)/dest-io-monitor.log"
 }
@@ -3346,6 +3613,17 @@ dd_io_monitor_stop(){
   done
   warn "destination I/O monitor did not stop quickly; continuing dd full copy cleanup"
   DD_IO_MONITOR_PID=""
+}
+
+dd_full_copy_signal_cleanup(){
+  local source_pid="${DD_FULL_COPY_SOURCE_PID:-}"
+  dd_auto_resume_if_paused "$source_pid" "${DD_FULL_COPY_MONITOR_LOG:-$(config_dir)/dest-io-monitor.log}"
+  dd_io_monitor_stop
+  if dd_source_pid_matches_current_run "$source_pid"; then
+    warn "Full copy interrupted; stopping current source dd pid=$source_pid"
+    kill -TERM "$source_pid" 2>/dev/null || true
+  fi
+  [[ -n "${DD_FULL_COPY_FIFO:-}" ]] && rm -f "$DD_FULL_COPY_FIFO"
 }
 
 dd_full_copy(){
@@ -3376,51 +3654,117 @@ dd_full_copy(){
   dd_throttle_info
   warn "dd full copy has no QMP block job. Do not interrupt it."
   warn "Final fsync is enabled; after 100% the process may wait while storage flushes data."
+  [[ "${DD_IO_AUTOPAUSE:-0}" == "1" ]] && warn "DD_IO_AUTOPAUSE=1; vmigrate may pause only the source dd PID started by this run during critical destination I/O pressure."
 
   state_write DD_COPY_STARTED "$(now_ts)" || true
   state_write DD_COPY_BYTES_COMPLETED 0 || true
   state_write DD_FINAL_FLUSH_STARTED "" || true
   state_write DD_EXITED 0 || true
+  state_write DD_SOURCE_EXIT_CODE "" || true
+  state_write DD_DOWNSTREAM_EXIT_CODE "" || true
+  state_write DD_SOURCE_TERMINATED_DUE_DOWNSTREAM 0 || true
   state_write DD_EXIT_CODE "" || true
+  state_write DD_SOURCE_PID "" || true
+  state_write DD_AUTO_PAUSED 0 || true
+  state_write DD_AUTO_PAUSE_STARTED_AT "" || true
+  state_write DD_AUTO_PAUSE_REASON "" || true
+  state_write DD_AUTO_PAUSE_COUNT 0 || true
+  state_write DD_AUTO_RESUME_COUNT 0 || true
+  state_write DD_LAST_IO_STATUS "" || true
+  state_write DD_LAST_IO_WRITEBACK_GIB "" || true
+  state_write DD_LAST_IO_B "" || true
+  state_write DD_LAST_IO_WA "" || true
+  state_write DD_LAST_IO_DSTATE_STORAGE "" || true
 
-  local old_pipefail=0 rc monitor_pid=""
+  local old_pipefail=0 rc=0 source_dd_rc=0 downstream_rc=0 overall_rc=0 source_terminated_due_downstream=0 monitor_pid="" fifo source_dd_pid pipe_status
+  fifo="$(config_dir)/dd-source.pipe"
+  rm -f "$fifo"
+  mkfifo "$fifo" || die "Could not create dd source FIFO: $fifo"
+  chmod 600 "$fifo" 2>/dev/null || true
+  DD_FULL_COPY_FIFO="$fifo"
+  DD_FULL_COPY_MONITOR_LOG="$(config_dir)/dest-io-monitor.log"
+  DD_FULL_COPY_SOURCE_PID=""
+
+  trap 'dd_full_copy_signal_cleanup; trap - INT TERM; exit 130' INT TERM
+
   set -o | grep -q '^pipefail[[:space:]]*on$' && old_pipefail=1
   set -o pipefail
 
   remote_dd_cmd="$(dd_priority_prefix_remote)"
-  dd_io_monitor_start || warn "Destination I/O monitor could not start; continuing dd full copy"
+
+  dd_priority_exec_local dd if="$SRC_DISK" bs="$DD_BS" iflag=fullblock status=progress 2> >(tr '\r' '\n' | dd_progress_parser "$src_size" >&2) > "$fifo" &
+  source_dd_pid=$!
+  DD_FULL_COPY_SOURCE_PID="$source_dd_pid"
+  state_write DD_SOURCE_PID "$source_dd_pid" || true
+
+  dd_io_monitor_start "$source_dd_pid" || warn "Destination I/O monitor could not start; continuing dd full copy"
   monitor_pid="${DD_IO_MONITOR_PID:-}"
 
   set +e
-  dd_priority_run_local dd if="$SRC_DISK" bs="$DD_BS" iflag=fullblock status=progress 2> >(tr '\r' '\n' | dd_progress_parser "$src_size" >&2) \
-    | dd_throttle_stream \
-    | ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${TARGET_SSH_USER}@${TARGET_HOST}" \
+  dd_throttle_stream < "$fifo" \
+    | ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "${TARGET_SSH_USER}@${TARGET_HOST}" \
         "$remote_dd_cmd"
-  rc=$?
-  set -e
+  pipe_status=("${PIPESTATUS[@]}")
+  downstream_rc=0
+  for rc in "${pipe_status[@]}"; do
+    if [[ "$rc" != "0" ]]; then downstream_rc="$rc"; break; fi
+  done
 
   DD_IO_MONITOR_PID="$monitor_pid"
+  dd_auto_resume_if_paused "$source_dd_pid" "$DD_FULL_COPY_MONITOR_LOG"
   dd_io_monitor_stop
+  if (( downstream_rc != 0 )); then
+    if dd_source_pid_matches_current_run "$source_dd_pid"; then
+      warn "Downstream dd pipeline failed; stopping current source dd pid=$source_dd_pid"
+      kill -TERM "$source_dd_pid" 2>/dev/null || true
+      source_terminated_due_downstream=1
+    else
+      warn "Downstream dd pipeline failed; source dd pid verification failed, not sending TERM"
+    fi
+  fi
+  wait "$source_dd_pid"
+  source_dd_rc=$?
+  set -e
+
+  rm -f "$fifo"
+  DD_FULL_COPY_FIFO=""
+  DD_FULL_COPY_SOURCE_PID=""
+  trap - INT TERM
 
   if [[ -z "$(state_get DD_FINAL_FLUSH_STARTED)" ]]; then
     state_write DD_FINAL_FLUSH_STARTED "$(now_ts)" || true
     warn "Copy stream ended; dd has exited or is finishing final close accounting."
   fi
   state_write DD_EXITED 1 || true
-  state_write DD_EXIT_CODE "$rc" || true
+  if (( downstream_rc != 0 )); then
+    overall_rc="$downstream_rc"
+  elif (( source_dd_rc != 0 )); then
+    overall_rc="$source_dd_rc"
+  else
+    overall_rc=0
+  fi
+  state_write DD_SOURCE_EXIT_CODE "$source_dd_rc" || true
+  state_write DD_DOWNSTREAM_EXIT_CODE "$downstream_rc" || true
+  state_write DD_SOURCE_TERMINATED_DUE_DOWNSTREAM "$source_terminated_due_downstream" || true
+  state_write DD_EXIT_CODE "$overall_rc" || true
 
   if (( old_pipefail == 0 )); then
     set +o pipefail
   fi
 
-  if (( rc != 0 )); then
-    warn "dd exited with code $rc."
-    die "dd full copy failed (exit=$rc)"
+  if (( downstream_rc != 0 )); then
+    warn "dd downstream pipeline failed with code $downstream_rc."
+    die "dd full copy failed (downstream exit=$downstream_rc)"
+  fi
+  if (( source_dd_rc != 0 )); then
+    warn "dd exited with code $source_dd_rc."
+    die "dd full copy failed (source dd exit=$source_dd_rc)"
   fi
 
   ok "dd exited successfully."
   ok "dd full copy completed"
 }
+
 
 full_sync(){
   load_config
@@ -3522,7 +3866,21 @@ report(){
   report_kv "DD_COPY_BYTES_COMPLETED" "$(state_get DD_COPY_BYTES_COMPLETED)"
   report_kv "DD_FINAL_FLUSH_STARTED" "$(state_get DD_FINAL_FLUSH_STARTED)"
   report_kv "DD_EXITED" "$(state_get DD_EXITED)"
+  report_kv "DD_SOURCE_EXIT_CODE" "$(state_get DD_SOURCE_EXIT_CODE)"
+  report_kv "DD_DOWNSTREAM_EXIT_CODE" "$(state_get DD_DOWNSTREAM_EXIT_CODE)"
+  report_kv "DD_SOURCE_TERMINATED_DUE_DOWNSTREAM" "$(state_get DD_SOURCE_TERMINATED_DUE_DOWNSTREAM)"
   report_kv "DD_EXIT_CODE" "$(state_get DD_EXIT_CODE)"
+  report_kv "DD_SOURCE_PID" "$(state_get DD_SOURCE_PID)"
+  report_kv "DD_AUTO_PAUSED" "$(state_get DD_AUTO_PAUSED)"
+  report_kv "DD_AUTO_PAUSE_STARTED_AT" "$(state_get DD_AUTO_PAUSE_STARTED_AT)"
+  report_kv "DD_AUTO_PAUSE_REASON" "$(state_get DD_AUTO_PAUSE_REASON)"
+  report_kv "DD_AUTO_PAUSE_COUNT" "$(state_get DD_AUTO_PAUSE_COUNT)"
+  report_kv "DD_AUTO_RESUME_COUNT" "$(state_get DD_AUTO_RESUME_COUNT)"
+  report_kv "DD_LAST_IO_STATUS" "$(state_get DD_LAST_IO_STATUS)"
+  report_kv "DD_LAST_IO_WRITEBACK_GIB" "$(state_get DD_LAST_IO_WRITEBACK_GIB)"
+  report_kv "DD_LAST_IO_B" "$(state_get DD_LAST_IO_B)"
+  report_kv "DD_LAST_IO_WA" "$(state_get DD_LAST_IO_WA)"
+  report_kv "DD_LAST_IO_DSTATE_STORAGE" "$(state_get DD_LAST_IO_DSTATE_STORAGE)"
 
   if command -v virsh >/dev/null 2>&1; then
     report_kv "VM state" "$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
