@@ -3258,15 +3258,16 @@ dd_io_monitor_sample(){
   local log="$1" sample writeback_kib writeback_gib vm_b vm_wa dstate_count threshold_kib ts timeout_s rc remote_cmd
   ts="$(now_ts)"
   timeout_s="${DD_IO_MONITOR_TIMEOUT:-10}"
-  remote_cmd="sh -c '
-    printf \"TS %s\\n\" \"$(date '+%Y-%m-%d %H:%M:%S')\"
-    printf \"LOAD \"; cat /proc/loadavg 2>/dev/null || true
-    awk '\''/^(Dirty|Writeback):/ {gsub(\":\", \"\", $1); print \"MEM\", $1, $2}'\'' /proc/meminfo 2>/dev/null || true
-    if command -v vmstat >/dev/null 2>&1; then
-      vmstat 1 2 | awk '\''NR==2 {for (i=1;i<=NF;i++) h[i]=$i} NR==4 {for (i=1;i<=NF;i++) {if (h[i]==\"b\") b=$i; if (h[i]==\"wa\") wa=$i}} END {if (b != \"\") print \"VMSTAT\", b, wa}'\''
-    fi
-    ps -eo state=,pid=,wchan=,comm= 2>/dev/null | awk '\''$1 ~ /^D/ {count++; line=$0; lines=lines \"DSTATE \" line \"\\n\"} END {print \"DSTATE_COUNT\", count+0; printf \"%s\", lines}'\''
-  '"
+  remote_cmd="$(cat <<'REMOTE'
+printf "TS %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+printf "LOAD "; cat /proc/loadavg 2>/dev/null || true
+awk '/^(Dirty|Writeback):/ {gsub(":", "", $1); print "MEM", $1, $2}' /proc/meminfo 2>/dev/null || true
+if command -v vmstat >/dev/null 2>&1; then
+  vmstat 1 2 | awk 'NR==2 {for (i=1;i<=NF;i++) h[i]=$i} NR==4 {for (i=1;i<=NF;i++) {if (h[i]=="b") b=$i; if (h[i]=="wa") wa=$i}} END {if (b != "") print "VMSTAT", b, wa}'
+fi
+ps -eo state=,pid=,wchan=,comm= 2>/dev/null | awk '$1 ~ /^D/ {count++; line=$0; lines=lines "DSTATE " line "\n"} END {print "DSTATE_COUNT", count+0; printf "%s", lines}'
+REMOTE
+)"
 
   set +e
   sample="$(dd_io_monitor_ssh "$timeout_s" "$remote_cmd")"
