@@ -673,7 +673,7 @@ write_key(){
 
 dd_config_key_allowed(){
   case "$1" in
-    DD_BS|DD_LOW_PRIORITY|DD_NICE|DD_IONICE_CLASS|DD_IONICE_PRIO|DD_THROTTLE|DD_THROTTLE_REQUIRED|DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M) return 0 ;;
+    DD_BS|DD_LOW_PRIORITY|DD_NICE|DD_IONICE_CLASS|DD_IONICE_PRIO|DD_THROTTLE|DD_THROTTLE_REQUIRED|DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M|DD_IO_MONITOR|DD_IO_MONITOR_INTERVAL|DD_IO_MONITOR_TIMEOUT|DD_IO_WARN_WRITEBACK_GIB|DD_IO_WARN_B|DD_IO_WARN_WA|DD_IO_WARN_DSTATE_COUNT) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -686,7 +686,9 @@ dd_config_value_valid(){
     DD_NICE) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 19 )) ;;
     DD_IONICE_CLASS) [[ "$val" =~ ^[23]$ ]] ;;
     DD_IONICE_PRIO) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 7 )) ;;
-    DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M) [[ "$val" =~ ^[1-9][0-9]*$ ]] ;;
+    DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M|DD_IO_MONITOR_INTERVAL|DD_IO_MONITOR_TIMEOUT|DD_IO_WARN_WRITEBACK_GIB|DD_IO_WARN_B|DD_IO_WARN_DSTATE_COUNT) [[ "$val" =~ ^[1-9][0-9]*$ ]] ;;
+    DD_IO_MONITOR) [[ "$val" =~ ^[01]$ ]] ;;
+    DD_IO_WARN_WA) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 100 )) ;;
     *) return 1 ;;
   esac
 }
@@ -703,6 +705,13 @@ dd_config_default(){
     DD_THROTTLE_S) printf '%s\n' "512" ;;
     DD_THROTTLE_W) printf '%s\n' "2" ;;
     DD_THROTTLE_M) printf '%s\n' "2000" ;;
+    DD_IO_MONITOR) printf '%s\n' "1" ;;
+    DD_IO_MONITOR_INTERVAL) printf '%s\n' "30" ;;
+    DD_IO_MONITOR_TIMEOUT) printf '%s\n' "10" ;;
+    DD_IO_WARN_WRITEBACK_GIB) printf '%s\n' "4" ;;
+    DD_IO_WARN_B) printf '%s\n' "30" ;;
+    DD_IO_WARN_WA) printf '%s\n' "40" ;;
+    DD_IO_WARN_DSTATE_COUNT) printf '%s\n' "5" ;;
     *) return 1 ;;
   esac
 }
@@ -718,7 +727,14 @@ dd_config_keys(){
     DD_THROTTLE_REQUIRED \
     DD_THROTTLE_S \
     DD_THROTTLE_W \
-    DD_THROTTLE_M
+    DD_THROTTLE_M \
+    DD_IO_MONITOR \
+    DD_IO_MONITOR_INTERVAL \
+    DD_IO_MONITOR_TIMEOUT \
+    DD_IO_WARN_WRITEBACK_GIB \
+    DD_IO_WARN_B \
+    DD_IO_WARN_WA \
+    DD_IO_WARN_DSTATE_COUNT
 }
 
 defaults_get_raw(){
@@ -955,6 +971,11 @@ state_sync_identity(){
   [[ -n "$(state_get FINAL_COMPLETED_AT)" ]] || state_write FINAL_COMPLETED_AT ""
   [[ -n "$(state_get SOURCE_STOPPED)" ]] || state_write SOURCE_STOPPED 0
   [[ -n "$(state_get SOURCE_STOPPED_AT)" ]] || state_write SOURCE_STOPPED_AT ""
+  [[ -n "$(state_get DD_COPY_STARTED)" ]] || state_write DD_COPY_STARTED ""
+  [[ -n "$(state_get DD_COPY_BYTES_COMPLETED)" ]] || state_write DD_COPY_BYTES_COMPLETED ""
+  [[ -n "$(state_get DD_FINAL_FLUSH_STARTED)" ]] || state_write DD_FINAL_FLUSH_STARTED ""
+  [[ -n "$(state_get DD_EXITED)" ]] || state_write DD_EXITED ""
+  [[ -n "$(state_get DD_EXIT_CODE)" ]] || state_write DD_EXIT_CODE ""
 }
 activate_run_dir(){
   local dir="$1"
@@ -2082,7 +2103,7 @@ parse_dd_progress_line(){
 }
 
 dd_progress_parser(){
-  local src_size="$1" line parsed copied speed_text speed_bps compact=0 printed=0
+  local src_size="$1" line parsed copied speed_text speed_bps compact=0 printed=0 flush_notice=0
 
   if [[ "${DEBUG:-0}" != "1" ]] && { [[ -t 2 ]] || [[ "${VMIGRATE_PROGRESS_COMPACT:-0}" == "1" ]]; }; then
     compact=1
@@ -2092,6 +2113,7 @@ dd_progress_parser(){
     [[ -n "$line" ]] || continue
     if parsed="$(parse_dd_progress_line "$line" "$src_size" 2>/dev/null)"; then
       IFS=$'\t' read -r copied speed_text speed_bps <<< "$parsed"
+      state_write DD_COPY_BYTES_COMPLETED "$copied" 2>/dev/null || true
       if (( compact )); then
         printf '\r\033[K'
         render_dd_progress_line "$copied" "$src_size" "$speed_text" "$speed_bps"
@@ -2100,6 +2122,13 @@ dd_progress_parser(){
         printf '\n'
       fi
       printed=1
+      if [[ "$copied" =~ ^[0-9]+$ && "$src_size" =~ ^[0-9]+$ ]] && (( copied >= src_size && flush_notice == 0 )); then
+        (( printed && compact )) && printf '\n'
+        state_write DD_FINAL_FLUSH_STARTED "$(now_ts)" 2>/dev/null || true
+        printf '%s\n' "Copy stream finished; waiting for dd exit/final flush/close..."
+        flush_notice=1
+        printed=0
+      fi
     else
       (( printed && compact )) && printf '\n'
       printf '%s\n' "$line"
@@ -3048,6 +3077,41 @@ validate_dd_priority_config(){
     warn "Invalid DD_THROTTLE_M=${DD_THROTTLE_M:-}; using 2000"
     DD_THROTTLE_M=2000
   fi
+
+  case "${DD_IO_MONITOR:-1}" in
+    0|1) ;;
+    *) warn "Invalid DD_IO_MONITOR=${DD_IO_MONITOR:-}; using 1"; DD_IO_MONITOR=1 ;;
+  esac
+
+  if ! [[ "${DD_IO_MONITOR_INTERVAL:-30}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_MONITOR_INTERVAL=${DD_IO_MONITOR_INTERVAL:-}; using 30"
+    DD_IO_MONITOR_INTERVAL=30
+  fi
+
+  if ! [[ "${DD_IO_MONITOR_TIMEOUT:-10}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_MONITOR_TIMEOUT=${DD_IO_MONITOR_TIMEOUT:-}; using 10"
+    DD_IO_MONITOR_TIMEOUT=10
+  fi
+
+  if ! [[ "${DD_IO_WARN_WRITEBACK_GIB:-4}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_WARN_WRITEBACK_GIB=${DD_IO_WARN_WRITEBACK_GIB:-}; using 4"
+    DD_IO_WARN_WRITEBACK_GIB=4
+  fi
+
+  if ! [[ "${DD_IO_WARN_B:-30}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_WARN_B=${DD_IO_WARN_B:-}; using 30"
+    DD_IO_WARN_B=30
+  fi
+
+  if ! [[ "${DD_IO_WARN_WA:-40}" =~ ^[0-9]+$ ]] || (( DD_IO_WARN_WA > 100 )); then
+    warn "Invalid DD_IO_WARN_WA=${DD_IO_WARN_WA:-}; using 40"
+    DD_IO_WARN_WA=40
+  fi
+
+  if ! [[ "${DD_IO_WARN_DSTATE_COUNT:-5}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_WARN_DSTATE_COUNT=${DD_IO_WARN_DSTATE_COUNT:-}; using 5"
+    DD_IO_WARN_DSTATE_COUNT=5
+  fi
 }
 
 dd_priority_info(){
@@ -3174,6 +3238,115 @@ exec dd of="\$target" bs="\$bs" iflag=fullblock conv=fsync status=none
 EOF
 }
 
+
+dd_io_monitor_ssh(){
+  local timeout_s="$1" remote_cmd="$2"
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${timeout_s}s" ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=5 "$TARGET_SSH_USER@$TARGET_HOST" "$remote_cmd"
+    return $?
+  fi
+
+  if [[ "${DD_IO_MONITOR_TIMEOUT_WARNED:-0}" != "1" ]]; then
+    warn "timeout command not found; destination I/O monitor samples may wait on SSH"
+    DD_IO_MONITOR_TIMEOUT_WARNED=1
+  fi
+  remote_ssh "$remote_cmd"
+}
+
+dd_io_monitor_sample(){
+  local log="$1" sample writeback_kib writeback_gib vm_b vm_wa dstate_count threshold_kib ts timeout_s rc remote_cmd
+  ts="$(now_ts)"
+  timeout_s="${DD_IO_MONITOR_TIMEOUT:-10}"
+  remote_cmd="sh -c '
+    printf \"TS %s\\n\" \"$(date '+%Y-%m-%d %H:%M:%S')\"
+    printf \"LOAD \"; cat /proc/loadavg 2>/dev/null || true
+    awk '\''/^(Dirty|Writeback):/ {gsub(\":\", \"\", $1); print \"MEM\", $1, $2}'\'' /proc/meminfo 2>/dev/null || true
+    if command -v vmstat >/dev/null 2>&1; then
+      vmstat 1 2 | awk '\''NR==2 {for (i=1;i<=NF;i++) h[i]=$i} NR==4 {for (i=1;i<=NF;i++) {if (h[i]==\"b\") b=$i; if (h[i]==\"wa\") wa=$i}} END {if (b != \"\") print \"VMSTAT\", b, wa}'\''
+    fi
+    ps -eo state=,pid=,wchan=,comm= 2>/dev/null | awk '\''$1 ~ /^D/ {count++; line=$0; lines=lines \"DSTATE \" line \"\\n\"} END {print \"DSTATE_COUNT\", count+0; printf \"%s\", lines}'\''
+  '"
+
+  set +e
+  sample="$(dd_io_monitor_ssh "$timeout_s" "$remote_cmd")"
+  rc=$?
+  set -e
+
+  if [[ "$rc" == "124" || "$rc" == "137" ]]; then
+    warn "destination I/O monitor sample timed out; continuing dd full copy"
+    printf '%s\n' "--- sample ${ts} timed out after ${timeout_s}s ---" >> "$log" 2>/dev/null || true
+    return 1
+  fi
+
+  if [[ "$rc" != "0" ]]; then
+    printf '%s\n' "--- sample ${ts} failed rc=${rc} ---" >> "$log" 2>/dev/null || true
+    return 1
+  fi
+
+  {
+    printf '%s\n' "--- sample ${ts} ---"
+    printf '%s\n' "$sample"
+  } >> "$log" 2>/dev/null || true
+
+  writeback_kib="$(printf '%s\n' "$sample" | awk '$1=="MEM" && $2=="Writeback" {print $3; exit}')"
+  if [[ "$writeback_kib" =~ ^[0-9]+$ ]]; then
+    threshold_kib=$(( DD_IO_WARN_WRITEBACK_GIB * 1024 * 1024 ))
+    if (( writeback_kib > threshold_kib )); then
+      writeback_gib="$(awk -v kb="$writeback_kib" 'BEGIN {printf "%.1f", kb/1024/1024}')"
+      warn "destination writeback is high: ${writeback_gib} GiB. Storage is still flushing; do not interrupt unless necessary."
+    fi
+  fi
+
+  vm_b="$(printf '%s\n' "$sample" | awk '$1=="VMSTAT" {print $2; exit}')"
+  vm_wa="$(printf '%s\n' "$sample" | awk '$1=="VMSTAT" {print $3; exit}')"
+  if [[ "$vm_b" =~ ^[0-9]+$ && "$vm_wa" =~ ^[0-9]+$ ]] && (( vm_b >= DD_IO_WARN_B || vm_wa >= DD_IO_WARN_WA )); then
+    warn "destination I/O pressure high: b=${vm_b} wa=${vm_wa}%. This may cause D-state on LVM-thin/storage."
+  fi
+
+  dstate_count="$(printf '%s\n' "$sample" | awk '$1=="DSTATE_COUNT" {print $2; exit}')"
+  if [[ "$dstate_count" =~ ^[0-9]+$ ]] && (( dstate_count >= DD_IO_WARN_DSTATE_COUNT )); then
+    warn "destination has D-state tasks: count=${dstate_count}. If this persists, pause/throttle future runs."
+  elif printf '%s\n' "$sample" | awk '$1=="DSTATE" && ($4 ~ /(dm-thin|rq_qos_wait|hpsa|nbd|blk|io_schedule)/ || $5 ~ /(dm-thin|hpsa|nbd|blk)/) {found=1} END {exit found ? 0 : 1}'; then
+    warn "destination has D-state tasks in storage paths. If this persists, pause/throttle future runs."
+  fi
+}
+
+dd_io_monitor_loop(){
+  local log interval
+  log="$(config_dir)/dest-io-monitor.log"
+  interval="${DD_IO_MONITOR_INTERVAL:-30}"
+  printf '%s\n' "# vmigrate destination I/O monitor started $(now_ts)" >> "$log" 2>/dev/null || true
+  while :; do
+    dd_io_monitor_sample "$log" || warn "destination I/O monitor sample failed; continuing dd full copy"
+    sleep "$interval" || break
+  done
+}
+
+dd_io_monitor_start(){
+  DD_IO_MONITOR_PID=""
+  [[ "${DD_IO_MONITOR:-1}" == "1" ]] || return 0
+  dd_io_monitor_loop &
+  DD_IO_MONITOR_PID=$!
+  ok "Destination I/O monitor enabled: $(config_dir)/dest-io-monitor.log"
+}
+
+dd_io_monitor_stop(){
+  local pid="${DD_IO_MONITOR_PID:-}" i
+  [[ -n "$pid" ]] || return 0
+  kill "$pid" 2>/dev/null || true
+  for i in 1 2 3 4 5; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null || true
+      DD_IO_MONITOR_PID=""
+      return 0
+    fi
+    sleep 0.2
+  done
+  warn "destination I/O monitor did not stop quickly; continuing dd full copy cleanup"
+  DD_IO_MONITOR_PID=""
+}
+
 dd_full_copy(){
   load_config
   [[ -n "${SRC_DISK:-}" ]] || die "SRC_DISK is empty. Run discover first."
@@ -3201,26 +3374,50 @@ dd_full_copy(){
   dd_priority_info
   dd_throttle_info
   warn "dd full copy has no QMP block job. Do not interrupt it."
+  warn "Final fsync is enabled; after 100% the process may wait while storage flushes data."
 
-  local old_pipefail=0
+  state_write DD_COPY_STARTED "$(now_ts)" || true
+  state_write DD_COPY_BYTES_COMPLETED 0 || true
+  state_write DD_FINAL_FLUSH_STARTED "" || true
+  state_write DD_EXITED 0 || true
+  state_write DD_EXIT_CODE "" || true
+
+  local old_pipefail=0 rc monitor_pid=""
   set -o | grep -q '^pipefail[[:space:]]*on$' && old_pipefail=1
   set -o pipefail
 
   remote_dd_cmd="$(dd_priority_prefix_remote)"
+  dd_io_monitor_start || warn "Destination I/O monitor could not start; continuing dd full copy"
+  monitor_pid="${DD_IO_MONITOR_PID:-}"
 
+  set +e
   dd_priority_run_local dd if="$SRC_DISK" bs="$DD_BS" iflag=fullblock status=progress 2> >(tr '\r' '\n' | dd_progress_parser "$src_size" >&2) \
     | dd_throttle_stream \
     | ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "${TARGET_SSH_USER}@${TARGET_HOST}" \
         "$remote_dd_cmd"
+  rc=$?
+  set -e
 
-  local rc=$?
+  DD_IO_MONITOR_PID="$monitor_pid"
+  dd_io_monitor_stop
+
+  if [[ -z "$(state_get DD_FINAL_FLUSH_STARTED)" ]]; then
+    state_write DD_FINAL_FLUSH_STARTED "$(now_ts)" || true
+    warn "Copy stream ended; dd has exited or is finishing final close accounting."
+  fi
+  state_write DD_EXITED 1 || true
+  state_write DD_EXIT_CODE "$rc" || true
 
   if (( old_pipefail == 0 )); then
     set +o pipefail
   fi
 
-  (( rc == 0 )) || die "dd full copy failed (exit=$rc)"
+  if (( rc != 0 )); then
+    warn "dd exited with code $rc."
+    die "dd full copy failed (exit=$rc)"
+  fi
 
+  ok "dd exited successfully."
   ok "dd full copy completed"
 }
 
@@ -3320,6 +3517,11 @@ report(){
   report_kv "FINAL_COMPLETED_AT" "$(state_get FINAL_COMPLETED_AT)"
   report_kv "SOURCE_STOPPED" "$(state_get SOURCE_STOPPED)"
   report_kv "SOURCE_STOPPED_AT" "$(state_get SOURCE_STOPPED_AT)"
+  report_kv "DD_COPY_STARTED" "$(state_get DD_COPY_STARTED)"
+  report_kv "DD_COPY_BYTES_COMPLETED" "$(state_get DD_COPY_BYTES_COMPLETED)"
+  report_kv "DD_FINAL_FLUSH_STARTED" "$(state_get DD_FINAL_FLUSH_STARTED)"
+  report_kv "DD_EXITED" "$(state_get DD_EXITED)"
+  report_kv "DD_EXIT_CODE" "$(state_get DD_EXIT_CODE)"
 
   if command -v virsh >/dev/null 2>&1; then
     report_kv "VM state" "$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
@@ -3705,6 +3907,34 @@ final_cutover(){
 }
 
 
+ensure_incremental_transport(){
+  load_config
+  info "Transport preflight..."
+  remote_run_check || die "Transport preflight failed. Run ./vmigrate remote-run-check and review the mismatch."
+
+  if tunnel_health_ok >/dev/null 2>&1; then
+    ok "Transport preflight OK; tunnel-check passed."
+    return 0
+  fi
+
+  warn "Transport preflight: tunnel/export is down; attempting run-scoped repair..."
+  remote_export || die "Transport repair failed while starting remote export. Run ./vmigrate resume for guidance."
+
+  if tunnel_health_ok >/dev/null 2>&1; then
+    ok "Transport repair OK; tunnel-check passed."
+    return 0
+  fi
+
+  if tunnel_listener_exists; then
+    tunnel_restart || die "Transport repair failed while restarting local tunnel. Run ./vmigrate tunnel-status and ./vmigrate resume."
+  else
+    start_tunnel || die "Transport repair failed while starting local tunnel. Run ./vmigrate resume for guidance."
+  fi
+
+  tunnel_check || die "Transport repair failed: NBD metadata check did not pass. Run ./vmigrate resume for guidance."
+  ok "Transport repair OK; tunnel-check passed."
+}
+
 finalize_workflow(){
   load_config
 
@@ -3747,12 +3977,7 @@ EOF
     return 0
   fi
 
-  remote_run_check
-  remote_export
-  if ! tunnel_health_ok >/dev/null 2>&1; then
-    start_tunnel
-  fi
-  tunnel_check || die "NBD metadata check failed. Fix tunnel/export before finalizing."
+  ensure_incremental_transport
 
   if ! bitmap_exists; then
     die "Bitmap $BITMAP is missing after FULL completed. Refusing to recreate it because changes since FULL would be missed."
