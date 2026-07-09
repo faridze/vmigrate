@@ -54,7 +54,7 @@ vmigrate v${VERSION}
 
 Usage:
   ./vmigrate version
-  ./vmigrate help [create|manual|batch|resume|finalize|config|ports|status|cleanup|upgrade]
+  ./vmigrate help [create|manual|batch|resume|finalize|config|defaults|ports|status|cleanup|upgrade]
   ./vmigrate upgrade-check
   ./vmigrate upgrade
   ./vmigrate discover [VM_NAME] [--yes]
@@ -63,6 +63,10 @@ Usage:
   ./vmigrate get KEY
   ./vmigrate set KEY VALUE
   ./vmigrate defaults show|get|set|unset
+  ./vmigrate defaults profiles
+  ./vmigrate defaults profile show <name>
+  ./vmigrate defaults profile apply <name>
+  ./vmigrate defaults wizard
   ./vmigrate list
   ./vmigrate history [VM_NAME] [--latest] [--failed]
   ./vmigrate active
@@ -129,7 +133,7 @@ Command summary:
   resume --run                    Run the next safe resume step automatically
   finalize                        Guided interactive post-FULL final workflow
   get/set                         Show or update active-run whitelisted config keys
-  defaults                        Show or update whitelisted defaults for new runs
+  defaults                        Show, profile, or update whitelisted defaults for new runs
   set-nbd-port auto               Pick a free per-run NBD port
   remote-export                   Start/reuse destination NBD export
   remote-dst-status               Show destination VM/NBD status
@@ -182,6 +186,7 @@ Help topics:
   ./vmigrate help resume      Continue after interruption
   ./vmigrate help finalize    Guided interactive post-FULL final workflow
   ./vmigrate help config      Safe config getter/setter and dd defaults
+  ./vmigrate help defaults    Defaults profiles and wizard
   ./vmigrate help ports       Automatic/manual NBD port handling
   ./vmigrate help status      Status, reports, jobs, history
   ./vmigrate help cleanup     Safe cleanup and stale cleanup
@@ -417,7 +422,7 @@ Safety:
 EOF
       ;;
 
-    config)
+    config|defaults)
       cat <<EOF
 Config getter/setter
 ====================
@@ -435,6 +440,10 @@ Persistent defaults for new runs:
   ./vmigrate defaults set DD_THROTTLE_M 2000
   ./vmigrate defaults set DD_BS 4M
   ./vmigrate defaults unset DD_THROTTLE
+  ./vmigrate defaults profiles
+  ./vmigrate defaults profile show safe-dest
+  ./vmigrate defaults profile apply safe-dest
+  ./vmigrate defaults wizard
 
 One-time defaults for a new create or batch-full run:
   VMIGRATE_DD_THROTTLE=1 VMIGRATE_DD_THROTTLE_M=2000 ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
@@ -444,6 +453,7 @@ Notes:
   DD_THROTTLE=1 enables local throttle between source dd and ssh.
   DD_THROTTLE_REQUIRED=1 makes missing throttle a hard error.
   DD_BS controls source and remote dd block size.
+  Profiles are opt-in; built-in defaults do not change until a profile is applied.
 EOF
       ;;
 
@@ -860,6 +870,198 @@ defaults_show(){
   done < <(dd_config_keys)
 }
 
+
+defaults_profile_settings(){
+  case "$1" in
+    balanced)
+      cat <<'EOF'
+DD_IO_MONITOR=1
+DD_IO_AUTOPAUSE=0
+DD_IO_WARN_WRITEBACK_GIB=4
+DD_IO_WARN_B=30
+DD_IO_WARN_WA=40
+DD_IO_WARN_DSTATE_COUNT=5
+EOF
+      ;;
+    safe-dest)
+      cat <<'EOF'
+DD_THROTTLE=1
+DD_THROTTLE_REQUIRED=0
+DD_THROTTLE_M=500
+DD_IO_MONITOR=1
+DD_IO_AUTOPAUSE=1
+DD_IO_PAUSE_CONSECUTIVE=2
+DD_IO_PAUSE_WRITEBACK_GIB=4
+DD_IO_PAUSE_B=30
+DD_IO_PAUSE_WA=40
+DD_IO_PAUSE_DSTATE_STORAGE=1
+DD_IO_RESUME_WRITEBACK_GIB=1
+DD_IO_RESUME_B=5
+DD_IO_RESUME_WA=10
+DD_IO_RESUME_CONSECUTIVE=2
+DD_IO_PAUSE_MAX_SEC=900
+DD_IO_PAUSE_COOLDOWN_SEC=60
+EOF
+      ;;
+    critical-dest)
+      cat <<'EOF'
+DD_THROTTLE=1
+DD_THROTTLE_REQUIRED=0
+DD_THROTTLE_M=300
+DD_IO_MONITOR=1
+DD_IO_AUTOPAUSE=1
+DD_IO_PAUSE_CONSECUTIVE=1
+DD_IO_PAUSE_WRITEBACK_GIB=2
+DD_IO_PAUSE_B=20
+DD_IO_PAUSE_WA=30
+DD_IO_PAUSE_DSTATE_STORAGE=1
+DD_IO_RESUME_WRITEBACK_GIB=1
+DD_IO_RESUME_B=3
+DD_IO_RESUME_WA=8
+DD_IO_RESUME_CONSECUTIVE=2
+DD_IO_PAUSE_MAX_SEC=1200
+DD_IO_PAUSE_COOLDOWN_SEC=90
+EOF
+      ;;
+    fast)
+      cat <<'EOF'
+DD_THROTTLE=0
+DD_THROTTLE_REQUIRED=0
+DD_IO_MONITOR=1
+DD_IO_AUTOPAUSE=0
+DD_IO_WARN_WRITEBACK_GIB=8
+DD_IO_WARN_B=60
+DD_IO_WARN_WA=70
+DD_IO_WARN_DSTATE_COUNT=8
+EOF
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+defaults_profile_description(){
+  case "$1" in
+    balanced) printf '%s\n' "general purpose; preserve current behavior; warning-only monitor" ;;
+    safe-dest) printf '%s\n' "protect destination storage; recommended for LVM-thin/HPE/writeback-sensitive servers" ;;
+    critical-dest) printf '%s\n' "very cautious mode for destinations with prior D-state, high writeback, or hangs" ;;
+    fast) printf '%s\n' "maximum speed for strong destination storage only" ;;
+    *) return 1 ;;
+  esac
+}
+
+defaults_profile_names(){
+  printf '%s\n' balanced safe-dest critical-dest fast
+}
+
+defaults_profiles(){
+  local name
+  printf '%s\n' "Available defaults profiles:"
+  while IFS= read -r name; do
+    printf '  %-14s %s\n' "$name" "$(defaults_profile_description "$name")"
+  done < <(defaults_profile_names)
+}
+
+defaults_profile_validate_settings(){
+  local settings="$1" line key val
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    [[ "$key" != "$line" ]] || die "Invalid profile setting: $line"
+    dd_config_key_allowed "$key" || die "Profile contains unsupported defaults key: $key"
+    dd_config_value_valid "$key" "$val" || die "Profile contains invalid value: $key=$val"
+  done <<< "$settings"
+}
+
+defaults_profile_show(){
+  local name="$1" settings
+  [[ -n "$name" ]] || die "Usage: ./vmigrate defaults profile show <name>"
+  settings="$(defaults_profile_settings "$name")" || die "Unknown defaults profile: $name"
+  defaults_profile_validate_settings "$settings"
+  printf '%s\n' "$settings"
+}
+
+defaults_profile_apply(){
+  local name="$1" settings line key val old
+  [[ -n "$name" ]] || die "Usage: ./vmigrate defaults profile apply <name>"
+  settings="$(defaults_profile_settings "$name")" || die "Unknown defaults profile: $name"
+  defaults_profile_validate_settings "$settings"
+
+  printf 'Defaults profile: %s\n' "$name"
+  printf 'Purpose: %s\n' "$(defaults_profile_description "$name")"
+  printf '%s\n' "Changes to ${DEFAULTS_FILE}:"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    old="$(defaults_get "$key")"
+    if [[ "$old" == "$val" ]]; then
+      printf '  %s: %s -> %s (unchanged)\n' "$key" "$old" "$val"
+    else
+      printf '  %s: %s -> %s\n' "$key" "$old" "$val"
+    fi
+  done <<< "$settings"
+
+  ask_exact "Apply defaults profile '$name'? Type APPLY:" "APPLY" || die "Aborted"
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    defaults_write_key "$key" "$val"
+  done <<< "$settings"
+  ok "defaults profile applied: $name"
+}
+
+defaults_wizard(){
+  local choice
+  cat <<EOF
+vmigrate defaults wizard
+========================
+1) balanced       General purpose, warning-only monitor
+2) safe-dest      Protect LVM-thin/HPE/writeback-sensitive destinations
+3) critical-dest  Very cautious mode for prior D-state/high writeback/hangs
+4) fast           Maximum speed for strong destination storage only
+5) custom later   Not implemented yet
+EOF
+  read -r -p "Choice [1]: " choice
+  case "${choice:-1}" in
+    1|balanced) defaults_profile_apply balanced ;;
+    2|safe-dest) defaults_profile_apply safe-dest ;;
+    3|critical-dest) defaults_profile_apply critical-dest ;;
+    4|fast) defaults_profile_apply fast ;;
+    5|custom|custom-later)
+      printf '%s\n' "custom wizard is not implemented yet; use defaults set KEY VALUE"
+      ;;
+    *) die "Unknown defaults wizard choice: $choice" ;;
+  esac
+}
+
+maybe_run_defaults_wizard_for_first_run(){
+  local command="$1" ans
+  case "$command" in
+    create|batch-full) ;;
+    *) return 0 ;;
+  esac
+  [[ ! -f "$DEFAULTS_FILE" ]] || return 0
+  [[ "${VMIGRATE_NO_DEFAULTS_WIZARD:-0}" != "1" ]] || return 0
+
+  if [[ ! -t 0 ]]; then
+    warn "No defaults file found; using built-in defaults. Run ./vmigrate defaults wizard to choose a profile."
+    return 0
+  fi
+
+  cat <<EOF
+No defaults file found; vmigrate will use built-in dd defaults unless you choose a profile.
+Profiles are opt-in and affect only new runs after they are applied.
+EOF
+  read -r -p "Open defaults wizard now? [Y/n]: " ans
+  case "$ans" in
+    ""|Y|y|yes|YES) defaults_wizard ;;
+    *) warn "No defaults file found; using built-in defaults. Run ./vmigrate defaults wizard to choose a profile." ;;
+  esac
+}
+
 defaults_cmd(){
   local sub="${1:-show}" key="${2:-}" val="${3:-}"
   case "$sub" in
@@ -880,11 +1082,30 @@ defaults_cmd(){
       defaults_delete_key "$key"
       ok "default unset: $key"
       ;;
+    profiles)
+      defaults_profiles
+      ;;
+    profile)
+      case "$key" in
+        show)
+          defaults_profile_show "$val"
+          ;;
+        apply)
+          defaults_profile_apply "$val"
+          ;;
+        *)
+          die "Usage: ./vmigrate defaults profile show|apply <name>"
+          ;;
+      esac
+      ;;
+    wizard)
+      defaults_wizard
+      ;;
     -h|--help|help)
-      help_cmd config
+      help_cmd defaults
       ;;
     *)
-      die "Usage: ./vmigrate defaults show|get|set|unset"
+      die "Usage: ./vmigrate defaults show|get|set|unset|profiles|profile|wizard"
       ;;
   esac
 }
@@ -5653,9 +5874,13 @@ case "$cmd" in
     case "${1:-}" in
       -h|--help|help) help_cmd create; exit 0 ;;
     esac
+    maybe_run_defaults_wizard_for_first_run create
     create_workflow "${1:-}" "${2:-}" "${3:-}" "${4:-22}" "${5:-root}"
     ;;
-  batch-full) batch_full "${1:-}" ;;
+  batch-full)
+    maybe_run_defaults_wizard_for_first_run batch-full
+    batch_full "${1:-}"
+    ;;
   remote-export) remote_export ;;
   remote-dst-status) remote_dst_status ;;
   remote-dst-close) remote_dst_close ;;
