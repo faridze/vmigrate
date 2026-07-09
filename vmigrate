@@ -793,14 +793,14 @@ hypervisor_value_valid(){
 disk_selector_value_valid(){
   local val="$1"
   [[ -n "$val" ]] || return 1
-  case "$val" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  case "$val" in *[!A-Za-z0-9_./:-]*) return 1 ;; esac
   return 0
 }
 
 target_id_value_valid(){
   local val="$1"
   [[ -n "$val" ]] || return 1
-  case "$val" in *[!A-Za-z0-9_.:-]*) return 1 ;; esac
+  case "$val" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
   return 0
 }
 
@@ -2133,6 +2133,29 @@ remote_prepare(){
     if [[ -z "$explicit_target_disk" ]]; then
       write_key TARGET_DISK ""
     fi
+
+    info "Resolving source and target disks when not explicitly configured"
+    resolve_create_disks_if_needed
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    if [[ "${SRC_HYPERVISOR_DETECTED:-}" == "proxmox" ]]; then
+      die "Proxmox source resolver is not enabled for live create/final workflow yet. Use libvirt source or wait for Proxmox source QMP/final support."
+    fi
+    if [[ "${SRC_HYPERVISOR_DETECTED:-}" == "libvirt" && ( -z "${QEMU_DEVICE:-}" || -z "${QEMU_NODE:-}" ) ]]; then
+      info "Running libvirt source discovery for QEMU device/node metadata"
+      discover "$VM_NAME" --yes
+      # shellcheck disable=SC1090
+      source "$CONFIG_FILE"
+    fi
+    [[ -n "${SRC_DISK:-}" && -b "$SRC_DISK" ]] || die "Source disk resolver did not write a raw block SRC_DISK."
+    [[ -n "${TARGET_DISK:-}" ]] || die "Target disk resolver did not write TARGET_DISK."
+    if [[ "${VMIGRATE_AUTO_NBD_PORT:-1}" == "1" ]]; then
+      info "Selecting automatic per-run NBD port"
+      set_nbd_port auto
+    else
+      warn "Automatic NBD port selection disabled by VMIGRATE_AUTO_NBD_PORT=0"
+    fi
+    remote_write_agent_config || die "Could not write destination agent config"
   else
     info "Discovering target ID $TARGET_ID"
     remote_ssh "cd '$rdir' && ./vmigrate-agent discover '$TARGET_ID' --yes" || die "Remote destination discover failed"
@@ -2142,30 +2165,14 @@ remote_prepare(){
     [[ "$token" == "$prefix"* ]] || die "Remote handoff token is invalid"
 
     apply_handoff "$token"
-  fi
 
-  if [[ "${VMIGRATE_AUTO_NBD_PORT:-1}" == "1" ]]; then
-    info "Selecting automatic per-run NBD port"
-    set_nbd_port auto
-  else
-    warn "Automatic NBD port selection disabled by VMIGRATE_AUTO_NBD_PORT=0"
-  fi
-
-  if [[ "$resolve_disks" == "1" ]]; then
-    info "Resolving source and target disks when not explicitly configured"
-    resolve_create_disks_if_needed
-    # shellcheck disable=SC1090
-    source "$CONFIG_FILE"
-    if [[ "${SRC_HYPERVISOR_DETECTED:-}" == "libvirt" && ( -z "${QEMU_DEVICE:-}" || -z "${QEMU_NODE:-}" ) ]]; then
-      info "Running libvirt source discovery for QEMU device/node metadata"
-      discover "$VM_NAME" --yes
-      # shellcheck disable=SC1090
-      source "$CONFIG_FILE"
+    if [[ "${VMIGRATE_AUTO_NBD_PORT:-1}" == "1" ]]; then
+      info "Selecting automatic per-run NBD port"
+      set_nbd_port auto
+    else
+      warn "Automatic NBD port selection disabled by VMIGRATE_AUTO_NBD_PORT=0"
     fi
-    [[ -n "${SRC_DISK:-}" && -b "$SRC_DISK" ]] || die "Source disk resolver did not write a raw block SRC_DISK."
-    [[ -n "${TARGET_DISK:-}" ]] || die "Target disk resolver did not write TARGET_DISK."
-    remote_write_agent_config || die "Could not write destination agent config"
-  else
+
     info "Running source discovery and writing SRC_DISK/QEMU_DEVICE/QEMU_NODE when unambiguous"
     discover "$VM_NAME" --yes
     # shellcheck disable=SC1090
