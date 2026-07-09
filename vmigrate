@@ -454,6 +454,9 @@ Notes:
   DD_THROTTLE_REQUIRED=1 makes missing throttle a hard error.
   DD_BS controls source and remote dd block size.
   Profiles are opt-in; built-in defaults do not change until a profile is applied.
+  SRC_HYPERVISOR/TARGET_HYPERVISOR may be auto, proxmox, or libvirt.
+  SRC_DISK_SELECTOR/TARGET_DISK_SELECTOR may be auto, a disk key like virtio0/vda, or a resolved path.
+  vmigrate migrates disk data only; VM config is not migrated and the target VM/disk must already exist.
 EOF
       ;;
 
@@ -641,6 +644,10 @@ load_config(){
   source "$CONFIG_FILE"
   : "${VM_NAME:?}"; : "${TARGET_HOST:?}"; : "${TARGET_SSH_USER:=root}"; : "${TARGET_SSH_PORT:=22}"; : "${TARGET_ID:?}"; : "${TARGET_DISK:?}"
   SRC_DISK="${SRC_DISK:-}"
+  SRC_HYPERVISOR="${SRC_HYPERVISOR:-auto}"
+  TARGET_HYPERVISOR="${TARGET_HYPERVISOR:-auto}"
+  SRC_DISK_SELECTOR="${SRC_DISK_SELECTOR:-auto}"
+  TARGET_DISK_SELECTOR="${TARGET_DISK_SELECTOR:-auto}"
   QEMU_DEVICE="${QEMU_DEVICE:-}"
   QEMU_NODE="${QEMU_NODE:-}"
   BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"
@@ -771,6 +778,92 @@ dd_config_keys(){
     DD_IO_PAUSE_COOLDOWN_SEC
 }
 
+
+resolver_config_key_allowed(){
+  case "$1" in
+    SRC_HYPERVISOR|TARGET_HYPERVISOR|SRC_DISK_SELECTOR|TARGET_DISK_SELECTOR) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+hypervisor_value_valid(){
+  case "$1" in auto|proxmox|libvirt) return 0 ;; *) return 1 ;; esac
+}
+
+disk_selector_value_valid(){
+  local val="$1"
+  [[ -n "$val" ]] || return 1
+  case "$val" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  return 0
+}
+
+target_id_value_valid(){
+  local val="$1"
+  [[ -n "$val" ]] || return 1
+  case "$val" in *[!A-Za-z0-9_.:-]*) return 1 ;; esac
+  return 0
+}
+
+validate_target_id_for_hypervisor(){
+  local target_id="$1" target_h="${2:-auto}"
+  target_id_value_valid "$target_id" || die "TARGET_ID contains unsafe characters or is empty."
+  hypervisor_value_valid "$target_h" || die "Invalid TARGET_HYPERVISOR=$target_h"
+  if [[ "$target_h" == "proxmox" ]]; then
+    case "$target_id" in *[!0-9]*|'') die "Target ID must be numeric when TARGET_HYPERVISOR=proxmox" ;; esac
+  fi
+}
+
+resolver_config_value_valid(){
+  local key="$1" val="$2"
+  case "$key" in
+    SRC_HYPERVISOR|TARGET_HYPERVISOR) hypervisor_value_valid "$val" ;;
+    SRC_DISK_SELECTOR|TARGET_DISK_SELECTOR) disk_selector_value_valid "$val" ;;
+    *) return 1 ;;
+  esac
+}
+
+resolver_config_default(){
+  case "$1" in
+    SRC_HYPERVISOR|TARGET_HYPERVISOR|SRC_DISK_SELECTOR|TARGET_DISK_SELECTOR) printf '%s\n' auto ;;
+    *) return 1 ;;
+  esac
+}
+
+resolver_config_keys(){
+  printf '%s\n' SRC_HYPERVISOR TARGET_HYPERVISOR SRC_DISK_SELECTOR TARGET_DISK_SELECTOR
+}
+
+config_key_allowed(){
+  dd_config_key_allowed "$1" || resolver_config_key_allowed "$1"
+}
+
+config_value_valid(){
+  local key="$1" val="$2"
+  if dd_config_key_allowed "$key"; then
+    dd_config_value_valid "$key" "$val"
+  else
+    resolver_config_value_valid "$key" "$val"
+  fi
+}
+
+config_default(){
+  local key="$1"
+  if dd_config_key_allowed "$key"; then
+    dd_config_default "$key"
+  else
+    resolver_config_default "$key"
+  fi
+}
+
+write_initial_resolver_defaults(){
+  local key val
+  while IFS= read -r key; do
+    [[ -z "$(get_conf "$key")" ]] || continue
+    val="$(resolver_config_initial_value "$key")" || return 1
+    write_key "$key" "$val"
+  done < <(resolver_config_keys)
+}
+
 defaults_get_raw(){
   local key="$1"
   [[ -f "$DEFAULTS_FILE" ]] || return 0
@@ -779,8 +872,8 @@ defaults_get_raw(){
 
 defaults_write_key(){
   local key="$1" val="$2" tmp
-  dd_config_key_allowed "$key" || die "Defaults key is not settable: $key"
-  dd_config_value_valid "$key" "$val" || die "Invalid value for $key: $val"
+  config_key_allowed "$key" || die "Defaults key is not settable: $key"
+  config_value_valid "$key" "$val" || die "Invalid value for $key: $val"
   tmp="$(mktemp)"
   [[ -f "$DEFAULTS_FILE" ]] && grep -v -E "^${key}=" "$DEFAULTS_FILE" > "$tmp" || true
   printf '%s=%s\n' "$key" "$val" >> "$tmp"
@@ -790,7 +883,7 @@ defaults_write_key(){
 
 defaults_delete_key(){
   local key="$1" tmp
-  dd_config_key_allowed "$key" || die "Defaults key is not unsettable: $key"
+  config_key_allowed "$key" || die "Defaults key is not unsettable: $key"
   tmp="$(mktemp)"
   [[ -f "$DEFAULTS_FILE" ]] && grep -v -E "^${key}=" "$DEFAULTS_FILE" > "$tmp" || true
   mv "$tmp" "$DEFAULTS_FILE"
@@ -827,6 +920,32 @@ dd_config_initial_value(){
   printf '%s\n' "$default_val"
 }
 
+resolver_config_initial_value(){
+  local key="$1" env_name env_val default_val saved_val
+  resolver_config_key_allowed "$key" || return 1
+  default_val="$(resolver_config_default "$key")" || return 1
+  env_name="$(dd_config_env_name "$key")"
+
+  if env_val="$(printenv "$env_name")"; then
+    if resolver_config_value_valid "$key" "$env_val"; then
+      printf '%s\n' "$env_val"
+      return 0
+    fi
+    warn_config "Invalid $env_name=$env_val; ignoring environment override"
+  fi
+
+  saved_val="$(defaults_get_raw "$key" || true)"
+  if [[ -n "$saved_val" ]]; then
+    if resolver_config_value_valid "$key" "$saved_val"; then
+      printf '%s\n' "$saved_val"
+      return 0
+    fi
+    warn_config "Invalid saved default $key=$saved_val in $DEFAULTS_FILE; using built-in default"
+  fi
+
+  printf '%s\n' "$default_val"
+}
+
 write_initial_dd_key(){
   local key="$1" val
   [[ -z "$(get_conf "$key")" ]] || return 0
@@ -851,23 +970,23 @@ initial_dd_defaults_text(){
 
 defaults_get(){
   local key="$1" val
-  dd_config_key_allowed "$key" || die "Defaults key is not readable: $key"
+  config_key_allowed "$key" || die "Defaults key is not readable: $key"
   val="$(defaults_get_raw "$key" || true)"
   if [[ -n "$val" ]]; then
-    if dd_config_value_valid "$key" "$val"; then
+    if config_value_valid "$key" "$val"; then
       printf '%s\n' "$val"
       return 0
     fi
     warn_config "Invalid saved default $key=$val in $DEFAULTS_FILE; showing built-in default"
   fi
-  dd_config_default "$key"
+  config_default "$key"
 }
 
 defaults_show(){
   local key
   while IFS= read -r key; do
     printf '%s=%s\n' "$key" "$(defaults_get "$key")"
-  done < <(dd_config_keys)
+  done < <(dd_config_keys; resolver_config_keys)
 }
 
 
@@ -1114,8 +1233,8 @@ set_config(){
   local key="${1:-}" val="${2:-}"
   [[ -n "$key" && -n "$val" ]] || die "Usage: ./vmigrate set KEY VALUE"
   [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE"
-  dd_config_key_allowed "$key" || die "Config key is not settable: $key"
-  dd_config_value_valid "$key" "$val" || die "Invalid value for $key: $val"
+  config_key_allowed "$key" || die "Config key is not settable: $key"
+  config_value_valid "$key" "$val" || die "Invalid value for $key: $val"
   write_key "$key" "$val"
   ok "$key=$val"
 }
@@ -1123,16 +1242,16 @@ set_config(){
 get_config(){
   local key="${1:-}" val
   [[ -n "$key" ]] || die "Usage: ./vmigrate get KEY"
-  dd_config_key_allowed "$key" || die "Config key is not readable: $key"
+  config_key_allowed "$key" || die "Config key is not readable: $key"
 
   val="$(get_conf "$key" || true)"
   if [[ -z "$val" ]]; then
-    val="$(dd_config_default "$key")" || die "No default for config key: $key"
+    val="$(config_default "$key")" || die "No default for config key: $key"
   fi
 
-  if ! dd_config_value_valid "$key" "$val"; then
+  if ! config_value_valid "$key" "$val"; then
     warn "Invalid saved value for $key: $val; showing default"
-    val="$(dd_config_default "$key")" || die "No default for config key: $key"
+    val="$(config_default "$key")" || die "No default for config key: $key"
   fi
 
   printf '%s\n' "$val"
@@ -1207,6 +1326,18 @@ state_sync_identity(){
   state_write VM_NAME "${VM_NAME:-}"
   state_write SRC_DISK "${SRC_DISK:-}"
   state_write TARGET_DISK "${TARGET_DISK:-}"
+  [[ -n "$(state_get SRC_HYPERVISOR)" ]] || state_write SRC_HYPERVISOR "${SRC_HYPERVISOR:-auto}"
+  [[ -n "$(state_get TARGET_HYPERVISOR)" ]] || state_write TARGET_HYPERVISOR "${TARGET_HYPERVISOR:-auto}"
+  [[ -n "$(state_get SRC_HYPERVISOR_DETECTED)" ]] || state_write SRC_HYPERVISOR_DETECTED ""
+  [[ -n "$(state_get TARGET_HYPERVISOR_DETECTED)" ]] || state_write TARGET_HYPERVISOR_DETECTED ""
+  [[ -n "$(state_get SRC_DISK_SELECTOR)" ]] || state_write SRC_DISK_SELECTOR "${SRC_DISK_SELECTOR:-auto}"
+  [[ -n "$(state_get TARGET_DISK_SELECTOR)" ]] || state_write TARGET_DISK_SELECTOR "${TARGET_DISK_SELECTOR:-auto}"
+  [[ -n "$(state_get SRC_DISK_KEY)" ]] || state_write SRC_DISK_KEY ""
+  [[ -n "$(state_get TARGET_DISK_KEY)" ]] || state_write TARGET_DISK_KEY ""
+  [[ -n "$(state_get SRC_DISK_TYPE)" ]] || state_write SRC_DISK_TYPE ""
+  [[ -n "$(state_get TARGET_DISK_TYPE)" ]] || state_write TARGET_DISK_TYPE ""
+  [[ -n "$(state_get SRC_DISK_SIZE)" ]] || state_write SRC_DISK_SIZE ""
+  [[ -n "$(state_get TARGET_DISK_SIZE)" ]] || state_write TARGET_DISK_SIZE ""
   [[ -n "$(state_get FULL_STARTED)" ]] || state_write FULL_STARTED 0
   [[ -n "$(state_get FULL_STARTED_AT)" ]] || state_write FULL_STARTED_AT ""
   [[ -n "$(state_get FULL_JOB_ID)" ]] || state_write FULL_JOB_ID ""
@@ -1467,6 +1598,10 @@ init_config(){
   cat > "$CONFIG_FILE" <<EOF
 VM_NAME=$vm
 SRC_DISK=$src_disk
+SRC_HYPERVISOR="$(resolver_config_initial_value SRC_HYPERVISOR)"
+TARGET_HYPERVISOR="$(resolver_config_initial_value TARGET_HYPERVISOR)"
+SRC_DISK_SELECTOR="$(resolver_config_initial_value SRC_DISK_SELECTOR)"
+TARGET_DISK_SELECTOR="$(resolver_config_initial_value TARGET_DISK_SELECTOR)"
 QEMU_DEVICE=
 QEMU_NODE=
 BITMAP=$(default_bitmap "$vm")
@@ -1515,6 +1650,7 @@ ensure_base_config(){
     [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
     [[ -n "$(get_conf BACKUP_METHOD)" ]] || write_key BACKUP_METHOD drive-backup
     write_initial_dd_defaults
+    write_initial_resolver_defaults
   else
     vm="$vm_arg"
     [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
@@ -1525,6 +1661,10 @@ ensure_base_config(){
     cat > "$CONFIG_FILE" <<EOF
 VM_NAME=$vm
 SRC_DISK=
+SRC_HYPERVISOR="$(resolver_config_initial_value SRC_HYPERVISOR)"
+TARGET_HYPERVISOR="$(resolver_config_initial_value TARGET_HYPERVISOR)"
+SRC_DISK_SELECTOR="$(resolver_config_initial_value SRC_DISK_SELECTOR)"
+TARGET_DISK_SELECTOR="$(resolver_config_initial_value TARGET_DISK_SELECTOR)"
 QEMU_DEVICE=
 QEMU_NODE=
 BITMAP=$(default_bitmap "$vm")
@@ -1550,6 +1690,8 @@ show_config(){
   cat <<EOF
 Source VM      : $VM_NAME
 Source disk    : ${SRC_DISK:-not set}
+Source hv      : ${SRC_HYPERVISOR:-auto}${SRC_HYPERVISOR_DETECTED:+ (detected ${SRC_HYPERVISOR_DETECTED})}
+Source selector: ${SRC_DISK_SELECTOR:-auto}
 QEMU device    : ${QEMU_DEVICE:-not set}
 QEMU node      : ${QEMU_NODE:-not set}
 Bitmap         : $BITMAP
@@ -1557,6 +1699,8 @@ Target node    : $TARGET_NODE
 Target         : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}
 Target ID      : $TARGET_ID
 Target disk    : $TARGET_DISK
+Target hv      : ${TARGET_HYPERVISOR:-auto}${TARGET_HYPERVISOR_DETECTED:+ (detected ${TARGET_HYPERVISOR_DETECTED})}
+Target selector: ${TARGET_DISK_SELECTOR:-auto}
 Remote run dir : ${REMOTE_RUN_DIR:-/root/vmigrate}
 NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 Tunnel mode    : $TUNNEL_MODE
@@ -1634,6 +1778,274 @@ remote_ssh_batch(){
   remote_ssh "$@"
 }
 
+
+proxmox_list_vm_disks_local(){
+  local vm="$1" key value volid path type size
+  command -v qm >/dev/null 2>&1 || return 1
+  command -v pvesm >/dev/null 2>&1 || return 1
+  qm config "$vm" >/dev/null 2>&1 || return 1
+  while IFS=: read -r key value; do
+    key="${key%%[[:space:]]*}"
+    value="${value# }"
+    [[ "$key" =~ ^(virtio|scsi|sata|ide)[0-9]+$ ]] || continue
+    [[ "$value" == *media=cdrom* || "$value" == *cloudinit* || "$value" == none* ]] && continue
+    volid="${value%%,*}"
+    [[ -n "$volid" ]] || continue
+    path="$(pvesm path "$volid" 2>/dev/null || true)"
+    [[ -n "$path" ]] || continue
+    type=unknown; size=""
+    if [[ -b "$path" ]]; then
+      type=block
+      size="$(blockdev --getsize64 "$path" 2>/dev/null || true)"
+    elif [[ -f "$path" ]]; then
+      type=file
+      size="$(stat -c %s "$path" 2>/dev/null || true)"
+    fi
+    printf '%s\tproxmox\t%s\t\t%s\t%s\t%s\n' "$key" "$type" "$volid" "$path" "$size"
+  done < <(qm config "$vm")
+}
+
+proxmox_list_vm_disks_remote(){
+  local vm="$1" q_vm
+  q_vm="$(shell_quote "$vm")"
+  remote_ssh "vm=$q_vm; qm config \"\$vm\" >/dev/null 2>&1 || exit 1; qm config \"\$vm\" | while IFS=: read -r key value; do key=\"\${key%%[[:space:]]*}\"; value=\"\${value# }\"; case \"\$key\" in virtio[0-9]*|scsi[0-9]*|sata[0-9]*|ide[0-9]*) ;; *) continue ;; esac; case \"\$value\" in *media=cdrom*|*cloudinit*|none*) continue ;; esac; volid=\"\${value%%,*}\"; [ -n \"\$volid\" ] || continue; path=\$(pvesm path \"\$volid\" 2>/dev/null || true); [ -n \"\$path\" ] || continue; type=unknown; size=; if [ -b \"\$path\" ]; then type=block; size=\$(blockdev --getsize64 \"\$path\" 2>/dev/null || true); elif [ -f \"\$path\" ]; then type=file; size=\$(stat -c %s \"\$path\" 2>/dev/null || true); fi; printf '%s\\tproxmox\\t%s\\t\\t%s\\t%s\\t%s\\n' \"\$key\" \"\$type\" \"\$volid\" \"\$path\" \"\$size\"; done"
+}
+
+libvirt_list_vm_disks_local(){
+  local vm="$1" line type device target source rest format size
+  command -v virsh >/dev/null 2>&1 || return 1
+  virsh domblklist --details "$vm" >/dev/null 2>&1 || return 1
+  while read -r type device target source rest; do
+    [[ "$device" == disk ]] || continue
+    [[ -n "$source" && "$source" != "-" ]] || continue
+    case "$device" in cdrom|floppy) continue ;; esac
+    format=""
+    size=""
+    if [[ "$type" == block && -b "$source" ]]; then
+      size="$(blockdev --getsize64 "$source" 2>/dev/null || true)"
+    elif [[ "$type" == file && -f "$source" ]]; then
+      if command -v qemu-img >/dev/null 2>&1; then
+        format="$(qemu-img info "$source" 2>/dev/null | awk -F': ' '/^file format:/ {print $2; exit}')"
+      fi
+      size="$(stat -c %s "$source" 2>/dev/null || true)"
+    fi
+    printf '%s\tlibvirt\t%s\t%s\t\t%s\t%s\n' "$target" "$type" "$format" "$source" "$size"
+  done < <(virsh domblklist --details "$vm" | awk 'NR>2')
+}
+
+libvirt_list_vm_disks_remote(){
+  local vm="$1" q_vm
+  q_vm="$(shell_quote "$vm")"
+  remote_ssh "vm=$q_vm; virsh domblklist --details \"\$vm\" >/dev/null 2>&1 || exit 1; virsh domblklist --details \"\$vm\" | awk 'NR>2' | while read -r type device target source rest; do [ \"\$device\" = disk ] || continue; [ -n \"\$source\" ] && [ \"\$source\" != - ] || continue; format=; size=; if [ \"\$type\" = block ] && [ -b \"\$source\" ]; then size=\$(blockdev --getsize64 \"\$source\" 2>/dev/null || true); elif [ \"\$type\" = file ] && [ -f \"\$source\" ]; then if command -v qemu-img >/dev/null 2>&1; then format=\$(qemu-img info \"\$source\" 2>/dev/null | awk -F': ' '/^file format:/ {print \$2; exit}'); fi; size=\$(stat -c %s \"\$source\" 2>/dev/null || true); fi; printf '%s\\tlibvirt\\t%s\\t%s\\t\\t%s\\t%s\\n' \"\$target\" \"\$type\" \"\$format\" \"\$source\" \"\$size\"; done"
+}
+
+proxmox_vm_state_remote(){
+  local vm="$1" q_vm
+  q_vm="$(shell_quote "$vm")"
+  remote_ssh "vm=$q_vm; qm status \"\$vm\" 2>/dev/null | awk '{print \$2; exit}'"
+}
+
+libvirt_vm_state_remote(){
+  local vm="$1" q_vm
+  q_vm="$(shell_quote "$vm")"
+  remote_ssh "vm=$q_vm; virsh domstate \"\$vm\" 2>/dev/null | head -n1"
+}
+
+detect_source_hypervisor(){
+  local requested="${SRC_HYPERVISOR:-auto}" prox=0 lib=0
+  hypervisor_value_valid "$requested" || die "Invalid SRC_HYPERVISOR=$requested"
+  if [[ "$requested" == proxmox || "$requested" == auto ]]; then
+    command -v qm >/dev/null 2>&1 && qm config "$VM_NAME" >/dev/null 2>&1 && prox=1
+  fi
+  if [[ "$requested" == libvirt || "$requested" == auto ]]; then
+    command -v virsh >/dev/null 2>&1 && virsh dominfo "$VM_NAME" >/dev/null 2>&1 && lib=1
+  fi
+  case "$requested:$prox:$lib" in
+    proxmox:1:*) printf '%s\n' proxmox ;;
+    proxmox:0:*) die "Source hypervisor proxmox was requested, but qm config failed for $VM_NAME." ;;
+    libvirt:*:1) printf '%s\n' libvirt ;;
+    libvirt:*:0) die "Source hypervisor libvirt was requested, but virsh dominfo failed for $VM_NAME." ;;
+    auto:1:0) printf '%s\n' proxmox ;;
+    auto:0:1) printf '%s\n' libvirt ;;
+    auto:1:1) die "Source hypervisor is ambiguous; set SRC_HYPERVISOR=proxmox or SRC_HYPERVISOR=libvirt." ;;
+    *) die "Could not detect source hypervisor; set SRC_HYPERVISOR=proxmox or SRC_HYPERVISOR=libvirt." ;;
+  esac
+}
+
+detect_target_hypervisor(){
+  local requested="${TARGET_HYPERVISOR:-auto}" q_id prox=0 lib=0
+  hypervisor_value_valid "$requested" || die "Invalid TARGET_HYPERVISOR=$requested"
+  q_id="$(shell_quote "$TARGET_ID")"
+  if [[ "$requested" == proxmox || "$requested" == auto ]]; then
+    remote_ssh "id=$q_id; command -v qm >/dev/null 2>&1 && qm config \"\$id\" >/dev/null 2>&1" >/dev/null 2>&1 && prox=1
+  fi
+  if [[ "$requested" == libvirt || "$requested" == auto ]]; then
+    remote_ssh "id=$q_id; command -v virsh >/dev/null 2>&1 && virsh dominfo \"\$id\" >/dev/null 2>&1" >/dev/null 2>&1 && lib=1
+  fi
+  case "$requested:$prox:$lib" in
+    proxmox:1:*) printf '%s\n' proxmox ;;
+    proxmox:0:*) die "Target hypervisor proxmox was requested, but qm config failed for $TARGET_ID." ;;
+    libvirt:*:1) printf '%s\n' libvirt ;;
+    libvirt:*:0) die "Target hypervisor libvirt was requested, but virsh dominfo failed for $TARGET_ID." ;;
+    auto:1:0) printf '%s\n' proxmox ;;
+    auto:0:1) printf '%s\n' libvirt ;;
+    auto:1:1) die "Target hypervisor is ambiguous; set TARGET_HYPERVISOR=proxmox or TARGET_HYPERVISOR=libvirt." ;;
+    *) die "Could not detect target hypervisor; set TARGET_HYPERVISOR=proxmox or TARGET_HYPERVISOR=libvirt." ;;
+  esac
+}
+
+list_source_vm_disks(){
+  case "$1" in
+    proxmox) proxmox_list_vm_disks_local "$VM_NAME" ;;
+    libvirt) libvirt_list_vm_disks_local "$VM_NAME" ;;
+    *) die "Unsupported source hypervisor: $1" ;;
+  esac
+}
+
+list_target_vm_disks(){
+  case "$1" in
+    proxmox) proxmox_list_vm_disks_remote "$TARGET_ID" ;;
+    libvirt) libvirt_list_vm_disks_remote "$TARGET_ID" ;;
+    *) die "Unsupported target hypervisor: $1" ;;
+  esac
+}
+
+print_resolved_disk_list(){
+  local disks="$1" line key provider type format volid path size
+  printf '%s\n' "$disks" | while IFS=$'\t' read -r key provider type format volid path size; do
+    [[ -n "$key" ]] || continue
+    printf '  %s %s %s %s\n' "$key" "$type" "$path" "${size:-unknown}"
+  done
+}
+
+select_resolved_disk_or_die(){
+  local label="$1" selector="$2" disks="$3" count line key provider type format volid path size match=""
+  disk_selector_value_valid "$selector" || die "Invalid ${label} disk selector: $selector"
+  count="$(printf '%s\n' "$disks" | awk 'NF {c++} END {print c+0}')"
+  (( count > 0 )) || die "No ${label} disks found."
+  if [[ "$selector" == auto ]]; then
+    if (( count == 1 )); then
+      printf '%s\n' "$disks" | awk 'NF {print; exit}'
+      return 0
+    fi
+    warn "Multiple ${label} disks found; refusing to guess. Set ${label^^}_DISK_SELECTOR."
+    print_resolved_disk_list "$disks"
+    die "Multiple ${label} disks found."
+  fi
+  while IFS=$'\t' read -r key provider type format volid path size; do
+    [[ -n "$key" ]] || continue
+    if [[ "$selector" == "$key" || "$selector" == "$path" ]]; then
+      match="$key"$'\t'"$provider"$'\t'"$type"$'\t'"$format"$'\t'"$volid"$'\t'"$path"$'\t'"$size"
+      break
+    fi
+  done <<< "$disks"
+  [[ -n "$match" ]] || { print_resolved_disk_list "$disks"; die "No ${label} disk matches selector: $selector"; }
+  printf '%s\n' "$match"
+}
+
+resolved_disk_block_or_die(){
+  local label="$1" type="$2" path="$3"
+  [[ "$type" == block ]] || die "Resolved disk is not a raw block device; qemu-img transport is not implemented yet. ${label}: $path"
+}
+
+target_vm_stopped_or_die(){
+  local provider="$1" state
+  case "$provider" in
+    proxmox) state="$(proxmox_vm_state_remote "$TARGET_ID" | tail -n1 || true)" ;;
+    libvirt) state="$(libvirt_vm_state_remote "$TARGET_ID" | tail -n1 || true)" ;;
+    *) die "Unsupported target hypervisor: $provider" ;;
+  esac
+  [[ -n "$state" ]] || die "Could not determine target VM state."
+  case "$state" in
+    running|paused) die "Target VM must be stopped before disk-data migration. Current state: ${state:-unknown}" ;;
+  esac
+}
+
+resolved_disks_same_size_or_die(){
+  local src_size target_size q_target
+  src_size="$(disk_size_bytes "$SRC_DISK")" || die "Could not read source disk size: $SRC_DISK"
+  q_target="$(shell_quote "$TARGET_DISK")"
+  target_size="$(remote_ssh "disk=$q_target; test -b \"\$disk\" && blockdev --getsize64 \"\$disk\"")" || die "Could not read target disk size: $TARGET_DISK"
+  [[ "$src_size" == "$target_size" ]] || die "Resolved disk size mismatch: source=$src_size target=$target_size"
+  write_key SRC_DISK_SIZE "$src_size"
+  write_key TARGET_DISK_SIZE "$target_size"
+  state_write SRC_DISK_SIZE "$src_size" 2>/dev/null || true
+  state_write TARGET_DISK_SIZE "$target_size" 2>/dev/null || true
+  ok "Size check: OK"
+}
+
+resolve_source_disk(){
+  local provider disks selected key disk_provider type format volid path size
+  [[ -z "${SRC_DISK:-}" ]] || return 0
+  provider="$(detect_source_hypervisor)"
+  disks="$(list_source_vm_disks "$provider")" || die "Could not list source disks using $provider."
+  selected="$(select_resolved_disk_or_die source "${SRC_DISK_SELECTOR:-auto}" "$disks")"
+  IFS=$'\t' read -r key disk_provider type format volid path size <<< "$selected"
+  resolved_disk_block_or_die "source" "$type" "$path"
+  [[ -b "$path" ]] || die "Resolved source disk is not a block device: $path"
+  write_key SRC_HYPERVISOR_DETECTED "$provider"
+  write_key SRC_DISK_KEY "$key"
+  write_key SRC_DISK_TYPE "$type"
+  write_key SRC_DISK_SIZE "$size"
+  write_key SRC_DISK "$path"
+  state_write SRC_HYPERVISOR_DETECTED "$provider" 2>/dev/null || true
+  state_write SRC_DISK_KEY "$key" 2>/dev/null || true
+  state_write SRC_DISK_TYPE "$type" 2>/dev/null || true
+  state_write SRC_DISK_SIZE "$size" 2>/dev/null || true
+  SRC_DISK="$path"
+  ok "Detected source hypervisor: $provider"
+  ok "Source disk: $key $type $path ${size:-unknown} bytes"
+}
+
+resolve_target_disk(){
+  local provider disks selected key disk_provider type format volid path size
+  [[ -z "${TARGET_DISK:-}" ]] || return 0
+  provider="$(detect_target_hypervisor)"
+  target_vm_stopped_or_die "$provider"
+  disks="$(list_target_vm_disks "$provider")" || die "Could not list target disks using $provider."
+  selected="$(select_resolved_disk_or_die target "${TARGET_DISK_SELECTOR:-auto}" "$disks")"
+  IFS=$'\t' read -r key disk_provider type format volid path size <<< "$selected"
+  resolved_disk_block_or_die "target" "$type" "$path"
+  write_key TARGET_HYPERVISOR_DETECTED "$provider"
+  write_key TARGET_DISK_KEY "$key"
+  write_key TARGET_DISK_TYPE "$type"
+  write_key TARGET_DISK_SIZE "$size"
+  write_key TARGET_DISK "$path"
+  state_write TARGET_HYPERVISOR_DETECTED "$provider" 2>/dev/null || true
+  state_write TARGET_DISK_KEY "$key" 2>/dev/null || true
+  state_write TARGET_DISK_TYPE "$type" 2>/dev/null || true
+  state_write TARGET_DISK_SIZE "$size" 2>/dev/null || true
+  TARGET_DISK="$path"
+  ok "Detected target hypervisor: $provider"
+  ok "Target disk: $key $type $path ${size:-unknown} bytes"
+}
+
+resolve_create_disks_if_needed(){
+  local before_src="${SRC_DISK:-}" before_target="${TARGET_DISK:-}"
+  resolve_source_disk
+  resolve_target_disk
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  if [[ -z "$before_src" || -z "$before_target" ]]; then
+    resolved_disks_same_size_or_die
+    ok "Disk mode: block-to-block dd"
+  fi
+}
+
+
+remote_write_agent_config(){
+  local rdir env q_env q_vm q_id q_disk q_port q_export
+  rdir="$(remote_dir)"
+  env="${rdir}/vmigrate.env"
+  q_env="$(shell_quote "$env")"
+  q_vm="$(shell_quote "VM_NAME=$VM_NAME")"
+  q_id="$(shell_quote "TARGET_ID=$TARGET_ID")"
+  q_disk="$(shell_quote "TARGET_DISK=$TARGET_DISK")"
+  q_port="$(shell_quote "NBD_PORT=$NBD_PORT")"
+  q_export="$(shell_quote "NBD_EXPORT=$NBD_EXPORT")"
+  remote_ssh "printf '%s\\n' $q_vm $q_id $q_disk $q_port $q_export > $q_env && chmod 600 $q_env"
+}
+
 remote_prepare_next_steps(){
   load_config
   local effective
@@ -1668,11 +2080,11 @@ EOF
 }
 
 remote_prepare(){
-  local vm="${1:-}" target_host="${2:-}" target_id="${3:-}" ssh_port="${4:-22}" ssh_user="${5:-root}" show_next="${6:-1}"
-  local dst_script rdir token prefix="VMIGRATE_HANDOFF_V1:"
+  local vm="${1:-}" target_host="${2:-}" target_id="${3:-}" ssh_port="${4:-22}" ssh_user="${5:-root}" show_next="${6:-1}" resolve_disks="${7:-0}"
+  local dst_script rdir token prefix="VMIGRATE_HANDOFF_V1:" explicit_target_disk requested_target_h
 
   [[ -n "$vm" && -n "$target_host" && -n "$target_id" ]] || die "Usage: ./vmigrate remote-prepare VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]"
-  case "$target_id" in *[!0-9]*|'') die "Target ID must be numeric" ;; esac
+  target_id_value_valid "$target_id" || die "TARGET_ID contains unsafe characters or is empty."
   case "$ssh_port" in *[!0-9]*|'') die "SSH port must be numeric" ;; esac
   [[ -f "$SCRIPT_DIR/vmigrate" ]] || die "Source helper missing: $SCRIPT_DIR/vmigrate"
   dst_script="$SCRIPT_DIR/vmigrate-agent"
@@ -1694,6 +2106,11 @@ remote_prepare(){
   [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
   [[ -n "$(get_conf BACKUP_METHOD)" ]] || write_key BACKUP_METHOD drive-backup
   write_initial_dd_defaults
+  write_initial_resolver_defaults
+  requested_target_h="$(get_conf TARGET_HYPERVISOR || true)"
+  requested_target_h="${requested_target_h:-auto}"
+  validate_target_id_for_hypervisor "$target_id" "$requested_target_h"
+  explicit_target_disk="$(get_conf TARGET_DISK)"
 
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
@@ -1711,14 +2128,21 @@ remote_prepare(){
   scp -P "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$dst_script" "${TARGET_SSH_USER}@${TARGET_HOST}:${rdir}/vmigrate-agent" || die "Could not copy destination helper"
   remote_ssh "chmod +x '$rdir/vmigrate-agent'" || die "Could not make destination helper executable"
 
-  info "Discovering target ID $TARGET_ID"
-  remote_ssh "cd '$rdir' && ./vmigrate-agent discover '$TARGET_ID' --yes" || die "Remote destination discover failed"
+  if [[ "$resolve_disks" == "1" ]]; then
+    info "Skipping destination agent disk discovery; create resolver will resolve TARGET_DISK"
+    if [[ -z "$explicit_target_disk" ]]; then
+      write_key TARGET_DISK ""
+    fi
+  else
+    info "Discovering target ID $TARGET_ID"
+    remote_ssh "cd '$rdir' && ./vmigrate-agent discover '$TARGET_ID' --yes" || die "Remote destination discover failed"
 
-  info "Reading destination handoff token"
-  token="$(remote_ssh "cd '$rdir' && ./vmigrate-agent handoff")" || die "Remote destination handoff failed"
-  [[ "$token" == "$prefix"* ]] || die "Remote handoff token is invalid"
+    info "Reading destination handoff token"
+    token="$(remote_ssh "cd '$rdir' && ./vmigrate-agent handoff")" || die "Remote destination handoff failed"
+    [[ "$token" == "$prefix"* ]] || die "Remote handoff token is invalid"
 
-  apply_handoff "$token"
+    apply_handoff "$token"
+  fi
 
   if [[ "${VMIGRATE_AUTO_NBD_PORT:-1}" == "1" ]]; then
     info "Selecting automatic per-run NBD port"
@@ -1727,11 +2151,27 @@ remote_prepare(){
     warn "Automatic NBD port selection disabled by VMIGRATE_AUTO_NBD_PORT=0"
   fi
 
-  info "Running source discovery and writing SRC_DISK/QEMU_DEVICE/QEMU_NODE when unambiguous"
-  discover "$VM_NAME" --yes
-  # shellcheck disable=SC1090
-  source "$CONFIG_FILE"
-  [[ -n "${SRC_DISK:-}" && ( -b "$SRC_DISK" || -f "$SRC_DISK" ) && -n "${QEMU_DEVICE:-}" && -n "${QEMU_NODE:-}" ]] || die "Source discovery did not write valid SRC_DISK/QEMU_DEVICE/QEMU_NODE. Run: ./vmigrate discover $VM_NAME"
+  if [[ "$resolve_disks" == "1" ]]; then
+    info "Resolving source and target disks when not explicitly configured"
+    resolve_create_disks_if_needed
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    if [[ "${SRC_HYPERVISOR_DETECTED:-}" == "libvirt" && ( -z "${QEMU_DEVICE:-}" || -z "${QEMU_NODE:-}" ) ]]; then
+      info "Running libvirt source discovery for QEMU device/node metadata"
+      discover "$VM_NAME" --yes
+      # shellcheck disable=SC1090
+      source "$CONFIG_FILE"
+    fi
+    [[ -n "${SRC_DISK:-}" && -b "$SRC_DISK" ]] || die "Source disk resolver did not write a raw block SRC_DISK."
+    [[ -n "${TARGET_DISK:-}" ]] || die "Target disk resolver did not write TARGET_DISK."
+    remote_write_agent_config || die "Could not write destination agent config"
+  else
+    info "Running source discovery and writing SRC_DISK/QEMU_DEVICE/QEMU_NODE when unambiguous"
+    discover "$VM_NAME" --yes
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    [[ -n "${SRC_DISK:-}" && ( -b "$SRC_DISK" || -f "$SRC_DISK" ) && -n "${QEMU_DEVICE:-}" && -n "${QEMU_NODE:-}" ]] || die "Source discovery did not write valid SRC_DISK/QEMU_DEVICE/QEMU_NODE. Run: ./vmigrate discover $VM_NAME"
+  fi
   show_config
   if [[ "$show_next" == "1" ]]; then
     remote_prepare_next_steps
@@ -1852,10 +2292,15 @@ remote_port_is_free(){
 }
 
 pick_auto_nbd_port(){
-  local base port i
-  base=$((10000 + (TARGET_ID % 50000)))
+  local base port i seed
+  if [[ "$TARGET_ID" =~ ^[0-9]+$ ]]; then
+    seed="$TARGET_ID"
+  else
+    seed="$(printf '%s' "$TARGET_ID" | cksum | awk '{print $1}')"
+  fi
+  base=$((10000 + (seed % 50000)))
   (( base < 1024 )) && base=10809
-  (( base > 65000 )) && base=$((10809 + (TARGET_ID % 1000)))
+  (( base > 65000 )) && base=$((10809 + (seed % 1000)))
 
   for i in $(seq 0 100); do
     port=$((base + i))
@@ -2790,14 +3235,29 @@ EOF
 }
 
 preflight(){
-  load_config; need virsh; need ssh
+  local source_h q_target
+  load_config; need ssh
   [[ "$TUNNEL_MODE" != "autossh" ]] || need autossh
-  virsh list --all | awk '{print $2}' | grep -qx "$VM_NAME" || die "VM not found in virsh: $VM_NAME"
-  virsh domstate "$VM_NAME" | grep -qE 'running|paused' || die "VM is not running/paused"
-  [[ -n "$SRC_DISK" && ( -b "$SRC_DISK" || -f "$SRC_DISK" ) ]] || die "SRC_DISK missing or invalid. Run discover."
-  [[ -n "$QEMU_DEVICE" && -n "$QEMU_NODE" ]] || die "QEMU_DEVICE/QEMU_NODE missing. Run discover."
+  source_h="${SRC_HYPERVISOR_DETECTED:-${SRC_HYPERVISOR:-auto}}"
+  if [[ "$source_h" != "proxmox" ]]; then
+    need virsh
+    virsh list --all | awk '{print $2}' | grep -qx "$VM_NAME" || die "VM not found in virsh: $VM_NAME"
+    virsh domstate "$VM_NAME" | grep -qE 'running|paused' || die "VM is not running/paused"
+    [[ -n "$QEMU_DEVICE" && -n "$QEMU_NODE" ]] || die "QEMU_DEVICE/QEMU_NODE missing. Run discover."
+  fi
+  if [[ -n "${SRC_DISK_TYPE:-}" ]]; then
+    [[ "$SRC_DISK_TYPE" == "block" && -b "$SRC_DISK" ]] || die "Resolved SRC_DISK is not a raw block device; qemu-img transport is not implemented yet."
+  else
+    [[ -n "$SRC_DISK" && ( -b "$SRC_DISK" || -f "$SRC_DISK" ) ]] || die "SRC_DISK missing or invalid. Run discover."
+  fi
   [[ "$TARGET_HOST" != "CHANGE_ME" ]] || die "Set TARGET_HOST in $CONFIG_FILE"
-  ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "${TARGET_SSH_USER}@${TARGET_HOST}" "test -e '$TARGET_DISK' && echo connected" >/dev/null || die "Cannot verify destination disk over SSH"
+  q_target="$(shell_quote "$TARGET_DISK")"
+  if [[ -n "${TARGET_DISK_TYPE:-}" ]]; then
+    [[ "$TARGET_DISK_TYPE" == "block" ]] || die "Resolved TARGET_DISK is not a raw block device; qemu-img transport is not implemented yet."
+    remote_ssh "disk=$q_target; test -b \"\$disk\" && echo connected" >/dev/null || die "Cannot verify destination block disk over SSH"
+  else
+    remote_ssh "disk=$q_target; test -e \"\$disk\" && echo connected" >/dev/null || die "Cannot verify destination disk over SSH"
+  fi
   ok "Preflight checks passed"
 }
 
@@ -4066,8 +4526,20 @@ report(){
   echo "----------------"
   report_kv "VM name" "$VM_NAME"
   report_kv "Source disk" "${SRC_DISK:-not set}"
+  report_kv "Source hypervisor" "${SRC_HYPERVISOR:-auto}"
+  report_kv "Source detected" "$(state_get SRC_HYPERVISOR_DETECTED)"
+  report_kv "Source selector" "${SRC_DISK_SELECTOR:-auto}"
+  report_kv "Source disk key" "$(state_get SRC_DISK_KEY)"
+  report_kv "Source disk type" "$(state_get SRC_DISK_TYPE)"
+  report_kv "Source disk size" "$(state_get SRC_DISK_SIZE)"
   report_kv "Target ID" "$TARGET_ID"
   report_kv "Target disk" "$TARGET_DISK"
+  report_kv "Target hypervisor" "${TARGET_HYPERVISOR:-auto}"
+  report_kv "Target detected" "$(state_get TARGET_HYPERVISOR_DETECTED)"
+  report_kv "Target selector" "${TARGET_DISK_SELECTOR:-auto}"
+  report_kv "Target disk key" "$(state_get TARGET_DISK_KEY)"
+  report_kv "Target disk type" "$(state_get TARGET_DISK_TYPE)"
+  report_kv "Target disk size" "$(state_get TARGET_DISK_SIZE)"
   report_kv "Bitmap" "$BITMAP"
   report_kv "Target node" "$TARGET_NODE"
   report_kv "Backup method" "${BACKUP_METHOD:-drive-backup}"
@@ -5668,7 +6140,7 @@ create_workflow(){
   local vm="$1" target_id="$2" target_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}"
 
   [[ -n "$vm" && -n "$target_id" && -n "$target_host" ]] || die "Usage: ./vmigrate create VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]"
-  case "$target_id" in *[!0-9]*|'') die "Target ID must be numeric" ;; esac
+  target_id_value_valid "$target_id" || die "TARGET_ID contains unsafe characters or is empty."
   case "$ssh_port" in *[!0-9]*|'') die "SSH port must be numeric" ;; esac
   [[ -n "$ssh_user" ]] || die "SSH user must not be empty"
 
@@ -5695,7 +6167,7 @@ EOF
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
   activate_run_dir "$RUN_DIR"
 
-  remote_prepare "$vm" "$target_host" "$target_id" "$ssh_port" "$ssh_user" 0
+  remote_prepare "$vm" "$target_host" "$target_id" "$ssh_port" "$ssh_user" 0 1
   archive_config_snapshot
   preflight
 
