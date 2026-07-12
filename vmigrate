@@ -1801,14 +1801,14 @@ proxmox_list_vm_disks_local(){
       type=file
       size="$(stat -c %s "$path" 2>/dev/null || true)"
     fi
-    printf '%s\tproxmox\t%s\t\t%s\t%s\t%s\n' "$key" "$type" "$volid" "$path" "$size"
+    printf '%s\tproxmox\t%s\t-\t%s\t%s\t%s\n' "$key" "$type" "$volid" "$path" "$size"
   done < <(qm config "$vm")
 }
 
 proxmox_list_vm_disks_remote(){
   local vm="$1" q_vm
   q_vm="$(shell_quote "$vm")"
-  remote_ssh "vm=$q_vm; qm config \"\$vm\" >/dev/null 2>&1 || exit 1; qm config \"\$vm\" | while IFS=: read -r key value; do key=\"\${key%%[[:space:]]*}\"; value=\"\${value# }\"; case \"\$key\" in virtio[0-9]*|scsi[0-9]*|sata[0-9]*|ide[0-9]*) ;; *) continue ;; esac; case \"\$value\" in *media=cdrom*|*cloudinit*|none*) continue ;; esac; volid=\"\${value%%,*}\"; [ -n \"\$volid\" ] || continue; path=\$(pvesm path \"\$volid\" 2>/dev/null || true); [ -n \"\$path\" ] || continue; type=unknown; size=; if [ -b \"\$path\" ]; then type=block; size=\$(blockdev --getsize64 \"\$path\" 2>/dev/null || true); elif [ -f \"\$path\" ]; then type=file; size=\$(stat -c %s \"\$path\" 2>/dev/null || true); fi; printf '%s\\tproxmox\\t%s\\t\\t%s\\t%s\\t%s\\n' \"\$key\" \"\$type\" \"\$volid\" \"\$path\" \"\$size\"; done"
+  remote_ssh "vm=$q_vm; qm config \"\$vm\" >/dev/null 2>&1 || exit 1; qm config \"\$vm\" | while IFS=: read -r key value; do key=\"\${key%%[[:space:]]*}\"; value=\"\${value# }\"; case \"\$key\" in virtio[0-9]*|scsi[0-9]*|sata[0-9]*|ide[0-9]*) ;; *) continue ;; esac; case \"\$value\" in *media=cdrom*|*cloudinit*|none*) continue ;; esac; volid=\"\${value%%,*}\"; [ -n \"\$volid\" ] || continue; path=\$(pvesm path \"\$volid\" 2>/dev/null || true); [ -n \"\$path\" ] || continue; type=unknown; size=; if [ -b \"\$path\" ]; then type=block; size=\$(blockdev --getsize64 \"\$path\" 2>/dev/null || true); elif [ -f \"\$path\" ]; then type=file; size=\$(stat -c %s \"\$path\" 2>/dev/null || true); fi; printf '%s\\tproxmox\\t%s\\t-\\t%s\\t%s\\t%s\\n' \"\$key\" \"\$type\" \"\$volid\" \"\$path\" \"\$size\"; done"
 }
 
 libvirt_list_vm_disks_local(){
@@ -1829,14 +1829,14 @@ libvirt_list_vm_disks_local(){
       fi
       size="$(stat -c %s "$source" 2>/dev/null || true)"
     fi
-    printf '%s\tlibvirt\t%s\t%s\t\t%s\t%s\n' "$target" "$type" "$format" "$source" "$size"
+    printf '%s\tlibvirt\t%s\t%s\t-\t%s\t%s\n' "$target" "$type" "${format:--}" "$source" "$size"
   done < <(virsh domblklist --details "$vm" | awk 'NR>2')
 }
 
 libvirt_list_vm_disks_remote(){
   local vm="$1" q_vm
   q_vm="$(shell_quote "$vm")"
-  remote_ssh "vm=$q_vm; virsh domblklist --details \"\$vm\" >/dev/null 2>&1 || exit 1; virsh domblklist --details \"\$vm\" | awk 'NR>2' | while read -r type device target source rest; do [ \"\$device\" = disk ] || continue; [ -n \"\$source\" ] && [ \"\$source\" != - ] || continue; format=; size=; if [ \"\$type\" = block ] && [ -b \"\$source\" ]; then size=\$(blockdev --getsize64 \"\$source\" 2>/dev/null || true); elif [ \"\$type\" = file ] && [ -f \"\$source\" ]; then if command -v qemu-img >/dev/null 2>&1; then format=\$(qemu-img info \"\$source\" 2>/dev/null | awk -F': ' '/^file format:/ {print \$2; exit}'); fi; size=\$(stat -c %s \"\$source\" 2>/dev/null || true); fi; printf '%s\\tlibvirt\\t%s\\t%s\\t\\t%s\\t%s\\n' \"\$target\" \"\$type\" \"\$format\" \"\$source\" \"\$size\"; done"
+  remote_ssh "vm=$q_vm; virsh domblklist --details \"\$vm\" >/dev/null 2>&1 || exit 1; virsh domblklist --details \"\$vm\" | awk 'NR>2' | while read -r type device target source rest; do [ \"\$device\" = disk ] || continue; [ -n \"\$source\" ] && [ \"\$source\" != - ] || continue; format=; size=; if [ \"\$type\" = block ] && [ -b \"\$source\" ]; then size=\$(blockdev --getsize64 \"\$source\" 2>/dev/null || true); elif [ \"\$type\" = file ] && [ -f \"\$source\" ]; then if command -v qemu-img >/dev/null 2>&1; then format=\$(qemu-img info \"\$source\" 2>/dev/null | awk -F': ' '/^file format:/ {print \$2; exit}'); fi; size=\$(stat -c %s \"\$source\" 2>/dev/null || true); fi; printf '%s\\tlibvirt\\t%s\\t%s\\t-\\t%s\\t%s\\n' \"\$target\" \"\$type\" \"\${format:--}\" \"\$source\" \"\$size\"; done"
 }
 
 proxmox_vm_state_remote(){
