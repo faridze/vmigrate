@@ -690,7 +690,7 @@ write_key(){
 
 dd_config_key_allowed(){
   case "$1" in
-    DD_BS|DD_LOW_PRIORITY|DD_NICE|DD_IONICE_CLASS|DD_IONICE_PRIO|DD_THROTTLE|DD_THROTTLE_REQUIRED|DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M|DD_IO_MONITOR|DD_IO_MONITOR_INTERVAL|DD_IO_MONITOR_TIMEOUT|DD_IO_WARN_WRITEBACK_GIB|DD_IO_WARN_B|DD_IO_WARN_WA|DD_IO_WARN_DSTATE_COUNT|DD_IO_AUTOPAUSE|DD_IO_PAUSE_CONSECUTIVE|DD_IO_PAUSE_WRITEBACK_GIB|DD_IO_PAUSE_B|DD_IO_PAUSE_WA|DD_IO_PAUSE_DSTATE_STORAGE|DD_IO_RESUME_WRITEBACK_GIB|DD_IO_RESUME_B|DD_IO_RESUME_WA|DD_IO_RESUME_CONSECUTIVE|DD_IO_PAUSE_MAX_SEC|DD_IO_PAUSE_COOLDOWN_SEC) return 0 ;;
+    DD_BS|DD_LOW_PRIORITY|DD_NICE|DD_IONICE_CLASS|DD_IONICE_PRIO|DD_THROTTLE|DD_THROTTLE_REQUIRED|DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M|DD_IO_MONITOR|DD_IO_MONITOR_INTERVAL|DD_IO_MONITOR_TIMEOUT|DD_IO_WARN_WRITEBACK_GIB|DD_IO_WARN_B|DD_IO_WARN_WA|DD_IO_WARN_DSTATE_COUNT|DD_IO_AUTOPAUSE|DD_IO_PAUSE_CONSECUTIVE|DD_IO_PAUSE_WRITEBACK_GIB|DD_IO_PAUSE_B|DD_IO_PAUSE_WA|DD_IO_PAUSE_DSTATE_STORAGE|DD_IO_RESUME_WRITEBACK_GIB|DD_IO_RESUME_B|DD_IO_RESUME_WA|DD_IO_RESUME_CONSECUTIVE|DD_IO_PAUSE_MAX_SEC|DD_IO_PAUSE_COOLDOWN_SEC|DD_IO_RESUME_HOLD_SEC) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -703,7 +703,7 @@ dd_config_value_valid(){
     DD_NICE) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 19 )) ;;
     DD_IONICE_CLASS) [[ "$val" =~ ^[23]$ ]] ;;
     DD_IONICE_PRIO) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 7 )) ;;
-    DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M|DD_IO_MONITOR_INTERVAL|DD_IO_MONITOR_TIMEOUT|DD_IO_WARN_WRITEBACK_GIB|DD_IO_WARN_B|DD_IO_WARN_DSTATE_COUNT|DD_IO_PAUSE_CONSECUTIVE|DD_IO_PAUSE_WRITEBACK_GIB|DD_IO_PAUSE_B|DD_IO_RESUME_WRITEBACK_GIB|DD_IO_RESUME_B|DD_IO_RESUME_CONSECUTIVE|DD_IO_PAUSE_MAX_SEC|DD_IO_PAUSE_COOLDOWN_SEC) [[ "$val" =~ ^[1-9][0-9]*$ ]] ;;
+    DD_THROTTLE_S|DD_THROTTLE_W|DD_THROTTLE_M|DD_IO_MONITOR_INTERVAL|DD_IO_MONITOR_TIMEOUT|DD_IO_WARN_WRITEBACK_GIB|DD_IO_WARN_B|DD_IO_WARN_DSTATE_COUNT|DD_IO_PAUSE_CONSECUTIVE|DD_IO_PAUSE_WRITEBACK_GIB|DD_IO_PAUSE_B|DD_IO_RESUME_WRITEBACK_GIB|DD_IO_RESUME_B|DD_IO_RESUME_CONSECUTIVE|DD_IO_PAUSE_MAX_SEC|DD_IO_PAUSE_COOLDOWN_SEC|DD_IO_RESUME_HOLD_SEC) [[ "$val" =~ ^[1-9][0-9]*$ ]] ;;
     DD_IO_MONITOR) [[ "$val" =~ ^[01]$ ]] ;;
     DD_IO_WARN_WA|DD_IO_PAUSE_WA|DD_IO_RESUME_WA) [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 0 && val <= 100 )) ;;
     *) return 1 ;;
@@ -741,6 +741,7 @@ dd_config_default(){
     DD_IO_RESUME_CONSECUTIVE) printf '%s\n' "2" ;;
     DD_IO_PAUSE_MAX_SEC) printf '%s\n' "900" ;;
     DD_IO_PAUSE_COOLDOWN_SEC) printf '%s\n' "60" ;;
+    DD_IO_RESUME_HOLD_SEC) printf '%s\n' "120" ;;
     *) return 1 ;;
   esac
 }
@@ -775,7 +776,8 @@ dd_config_keys(){
     DD_IO_RESUME_WA \
     DD_IO_RESUME_CONSECUTIVE \
     DD_IO_PAUSE_MAX_SEC \
-    DD_IO_PAUSE_COOLDOWN_SEC
+    DD_IO_PAUSE_COOLDOWN_SEC \
+    DD_IO_RESUME_HOLD_SEC
 }
 
 
@@ -1020,6 +1022,7 @@ DD_IO_RESUME_WA=10
 DD_IO_RESUME_CONSECUTIVE=2
 DD_IO_PAUSE_MAX_SEC=900
 DD_IO_PAUSE_COOLDOWN_SEC=60
+DD_IO_RESUME_HOLD_SEC=120
 EOF
       ;;
     critical-dest)
@@ -1040,6 +1043,7 @@ DD_IO_RESUME_WA=8
 DD_IO_RESUME_CONSECUTIVE=2
 DD_IO_PAUSE_MAX_SEC=1200
 DD_IO_PAUSE_COOLDOWN_SEC=90
+DD_IO_RESUME_HOLD_SEC=120
 EOF
       ;;
     fast)
@@ -3916,6 +3920,11 @@ validate_dd_priority_config(){
     warn "Invalid DD_IO_PAUSE_COOLDOWN_SEC=${DD_IO_PAUSE_COOLDOWN_SEC:-}; using 60"
     DD_IO_PAUSE_COOLDOWN_SEC=60
   fi
+
+  if ! [[ "${DD_IO_RESUME_HOLD_SEC:-120}" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid DD_IO_RESUME_HOLD_SEC=${DD_IO_RESUME_HOLD_SEC:-}; using 120"
+    DD_IO_RESUME_HOLD_SEC=120
+  fi
 }
 
 dd_priority_info(){
@@ -4253,7 +4262,7 @@ dd_auto_resume_source(){
 }
 
 dd_io_monitor_loop(){
-  local source_dd_pid="${1:-}" log interval critical_count=0 healthy_count=0 paused=0 pause_started_epoch=0 last_signal_epoch=0 now held
+  local source_dd_pid="${1:-}" log interval critical_count=0 healthy_count=0 paused=0 pause_started_epoch=0 healthy_since_epoch=0 last_signal_epoch=0 now held
   log="$(config_dir)/dest-io-monitor.log"
   interval="${DD_IO_MONITOR_INTERVAL:-30}"
   printf '%s\n' "# vmigrate destination I/O monitor started $(now_ts)" >> "$log" 2>/dev/null || true
@@ -4263,10 +4272,15 @@ dd_io_monitor_loop(){
         now="$(date +%s)"
         case "$DD_IO_SAMPLE_STATUS" in
           critical)
-            critical_count=$(( critical_count + 1 )); healthy_count=0
+            critical_count=$(( critical_count + 1 ))
+            healthy_count=0
+            healthy_since_epoch=0
             if (( paused == 0 && critical_count >= DD_IO_PAUSE_CONSECUTIVE && now - last_signal_epoch >= DD_IO_PAUSE_COOLDOWN_SEC )); then
               if dd_auto_pause_source "$source_dd_pid" "$DD_IO_SAMPLE_REASON" "$log"; then
-                paused=1; pause_started_epoch="$now"; last_signal_epoch="$now"
+                paused=1
+                pause_started_epoch="$now"
+                healthy_since_epoch=0
+                last_signal_epoch="$now"
               fi
             elif (( paused == 1 )); then
               held=$(( now - pause_started_epoch ))
@@ -4277,19 +4291,45 @@ dd_io_monitor_loop(){
             fi
             ;;
           healthy)
-            healthy_count=$(( healthy_count + 1 )); critical_count=0
-            if (( paused == 1 && healthy_count >= DD_IO_RESUME_CONSECUTIVE && now - last_signal_epoch >= DD_IO_PAUSE_COOLDOWN_SEC )); then
-              if dd_auto_resume_source "$source_dd_pid" "$log"; then
-                paused=0; pause_started_epoch=0; last_signal_epoch="$now"
+            healthy_count=$(( healthy_count + 1 ))
+            critical_count=0
+
+            if (( paused == 1 )); then
+              if (( healthy_since_epoch == 0 )); then
+                healthy_since_epoch="$now"
+                warn "Destination I/O healthy; holding for ${DD_IO_RESUME_HOLD_SEC}s before resuming source dd..."
               fi
+
+              held=$(( now - healthy_since_epoch ))
+
+              printf '%s\n' \
+                "$(now_ts) resume hold healthy ${held}/${DD_IO_RESUME_HOLD_SEC}s" \
+                >> "$log" 2>/dev/null || true
+
+              if (( healthy_count >= DD_IO_RESUME_CONSECUTIVE &&
+                    held >= DD_IO_RESUME_HOLD_SEC &&
+                    now - last_signal_epoch >= DD_IO_PAUSE_COOLDOWN_SEC )); then
+                if dd_auto_resume_source "$source_dd_pid" "$log"; then
+                  paused=0
+                  pause_started_epoch=0
+                  healthy_since_epoch=0
+                  last_signal_epoch="$now"
+                fi
+              fi
+            else
+              healthy_since_epoch=0
             fi
             ;;
           *)
-            critical_count=0; healthy_count=0
+            critical_count=0
+            healthy_count=0
+            healthy_since_epoch=0
             ;;
         esac
       fi
     else
+      healthy_count=0
+      healthy_since_epoch=0
       warn "destination I/O monitor sample failed; continuing dd full copy"
     fi
     sleep "$interval" || break
