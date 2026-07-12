@@ -1957,7 +1957,16 @@ target_vm_stopped_or_die(){
   esac
   [[ -n "$state" ]] || die "Could not determine target VM state."
   case "$state" in
-    running|paused) die "Target VM must be stopped before disk-data migration. Current state: ${state:-unknown}" ;;
+    running)
+      if [[ "$provider" == "proxmox" ]]; then
+        warn "Target VM is running; create will ask before stopping it during remote-export."
+      else
+        die "Target VM must be stopped before disk-data migration. Current state: ${state:-unknown}"
+      fi
+      ;;
+    paused)
+      die "Target VM must be stopped before disk-data migration. Current state: ${state:-unknown}"
+      ;;
   esac
 }
 
