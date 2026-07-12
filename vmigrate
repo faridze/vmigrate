@@ -2160,7 +2160,7 @@ remote_prepare(){
     [[ -n "${TARGET_DISK:-}" ]] || die "Target disk resolver did not write TARGET_DISK."
     if [[ "${VMIGRATE_AUTO_NBD_PORT:-1}" == "1" ]]; then
       info "Selecting automatic per-run NBD port"
-      set_nbd_port auto
+      set_nbd_port auto 0
     else
       warn "Automatic NBD port selection disabled by VMIGRATE_AUTO_NBD_PORT=0"
     fi
@@ -2331,8 +2331,9 @@ pick_auto_nbd_port(){
 }
 
 set_nbd_port(){
-  local port="${1:-}" rdir old_port
+  local port="${1:-}" sync_remote="${2:-1}" rdir old_port
   [[ -n "$port" ]] || die "Usage: ./vmigrate set-nbd-port PORT|auto"
+  [[ "$sync_remote" == "0" || "$sync_remote" == "1" ]] || die "Internal set-nbd-port sync mode must be 0 or 1"
 
   load_config
   need ssh
@@ -2352,7 +2353,11 @@ set_nbd_port(){
   echo "--------------------"
   remote_context
   echo
-  warn "This changes only the active run config and its remote per-run vmigrate.env."
+  if [[ "$sync_remote" == "1" ]]; then
+    warn "This changes only the active run config and its remote per-run vmigrate.env."
+  else
+    warn "This changes the active run config; destination vmigrate.env will be written next."
+  fi
   warn "It does not enable parallel migration automatically."
 
   if [[ "$old_port" != "$port" ]]; then
@@ -2364,11 +2369,15 @@ set_nbd_port(){
   write_key NBD_PORT "$port"
   NBD_PORT="$port"
 
-  remote_ssh "cd '$rdir' && test -f vmigrate.env && awk -v v='$port' 'BEGIN{done=0} /^NBD_PORT=/{print \"NBD_PORT=\" v; done=1; next} {print} END{if(!done) print \"NBD_PORT=\" v}' vmigrate.env > vmigrate.env.tmp && mv vmigrate.env.tmp vmigrate.env && chmod 600 vmigrate.env" || die "Could not update remote vmigrate.env NBD_PORT"
+  if [[ "$sync_remote" == "1" ]]; then
+    remote_ssh "cd '$rdir' && test -f vmigrate.env && awk -v v='$port' 'BEGIN{done=0} /^NBD_PORT=/{print \"NBD_PORT=\" v; done=1; next} {print} END{if(!done) print \"NBD_PORT=\" v}' vmigrate.env > vmigrate.env.tmp && mv vmigrate.env.tmp vmigrate.env && chmod 600 vmigrate.env" || die "Could not update remote vmigrate.env NBD_PORT"
 
-  ok "NBD_PORT updated for active run: $port"
-  echo
-  remote_run_check
+    ok "NBD_PORT updated for active run: $port"
+    echo
+    remote_run_check
+  else
+    ok "NBD_PORT selected for active run: $port"
+  fi
 }
 
 remote_run_check(){
